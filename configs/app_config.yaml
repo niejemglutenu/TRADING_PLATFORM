@@ -1,0 +1,163 @@
+# trading_platform/configs/app_config.yaml
+
+# --- Database Settings ---
+database_settings:
+  # For local Docker Compose using a 'db' service: DB_HOST_ENV_VAR=db
+  # For local Docker connecting to host DB: DB_HOST_ENV_VAR=host.docker.internal (Win/Mac) or bridge IP (Linux)
+  # For Cloud: DB_HOST_ENV_VAR=<your_cloud_db_endpoint>
+  host: ${DB_HOST_ENV_VAR} # This is good, value comes from environment
+  port: ${DB_PORT_ENV_VAR|5432} # Default 5432 is standard for PostgreSQL
+  database_name: ${DB_NAME_ENV_VAR|Stock} # Changed default for clarity
+  user: ${DB_USER_ENV_VAR|postgres} # Using a specific app user is good practice
+  password: ${DB_PASSWORD_ENV_VAR}       # CRITICAL: Must be set in environment, no default here!
+  minconn: ${DB_MINCONN_ENV_VAR|1}       # Allow overriding pool size
+  maxconn: ${DB_MAXCONN_ENV_VAR|5}
+  # schema: ${DB_SCHEMA_ENV_VAR|public} # Optional, if you use specific schemas
+
+# --- API Settings ---
+api_settings:
+  alpaca: # Good to group by provider
+    # These MUST be set via environment variables
+    api_key: ${ALPACA_API_KEY_ENV_VAR}
+    api_secret: ${ALPACA_API_SECRET_ENV_VAR}
+    # For live trading, this would be set to 'false' via environment variable
+    sandbox_mode: ${ALPACA_SANDBOX_MODE_ENV_VAR|true} # Default to sandbox is safer for dev/testing
+    data_feed: ${ALPACA_DATA_FEED_ENV_VAR|iex} # Default Alpaca data feed (iex or sip)
+  # polygon_io:
+  #   api_key: ${POLYGON_API_KEY_ENV_VAR}
+
+# --- Data Settings ---
+data_settings:
+  ohlcv_table_name: ${OHLCV_TABLE_NAME_ENV_VAR|NAS100} # Default OHLCV table name, can be overridden
+  default_timeframe: "1Day" # Alpaca/Polygon compatible (e.g., 1Min, 5Min, 1Hour, 1Day)
+  
+  # List of all symbols the system *might* ever care about for data ingestion tasks
+  # This could be a very broad list.
+  universe_symbols_for_ingestion: 
+    - "AAPL"
+    - "MSFT"
+    - "GOOGL"
+    - "AMZN"
+    - "NVDA"
+    - "NDAQ" # Example using a common symbol for Nasdaq 100 index
+    # - "^GSPC" # S&P 500
+  
+  # Specific index ticker used for correlation features or as a benchmark by strategies/evaluation.
+  # This should be one of the symbols included in universe_symbols_for_ingestion.
+  primary_index_ticker: "NDAQ" # Or your chosen primary index
+  
+  # Default start date for fetching historical data when a symbol is newly added to the system.
+  default_ingestion_start_date: "2018-01-01"
+  
+  # Settings for the update_all_market_data function
+  data_update_mode: ${DATA_UPDATE_MODE_ENV_VAR|update} # "update", "initial_load", "ensure_table_only"
+  skip_api_for_update_globally: ${SKIP_API_FOR_UPDATE_ENV_VAR|false} # Global flag to disable API calls for updates
+
+  # STOCKS_ALL: Define here if it's a fixed list for 'all_stocks_model' training scope.
+  # This can also be managed/overridden by more specific backtest/live profiles.
+  STOCKS_ALL: # Used if model_scope is "all_stocks_model"
+    - "AAPL"
+    - "MSFT"
+    - "GOOGL"
+    - "AMZN"
+    - "NVDA"
+    - "NDAQ"
+    # - "^NDX" # Optionally include index if it's part of an "all features" model
+
+# --- Feature Engineering Settings ---
+feature_engineering:
+  default_strategy_key: "ReturnsVariationStrategy" # Default strategy if not specified by CLI
+  strategies_config:
+    # Keys MUST match the class names of your FeatureEngineeringStrategy implementations
+    PastReturnsStrategy:
+      description: "Uses only past returns as features."
+      parameters: # Parameters specific to this strategy's __init__ or generate_features
+        lstm_window_size: 10 
+    ReturnsVariationStrategy:
+      description: "Uses past returns and their rolling standard deviation."
+      parameters:
+        lstm_window_size: 10
+        variation_window: 10
+        min_periods_variation: 5
+    ReturnsVarCorrStrategy:
+      description: "Returns, variation, and correlation with the primary_index_ticker."
+      parameters:
+        lstm_window_size: 10
+        variation_window: 10
+        min_periods_variation: 5
+        correlation_window: 20
+        min_periods_correlation: 10
+        # index_ticker_symbol: # No need to specify here, it will use data_settings.primary_index_ticker
+    # Example for a new strategy:
+    # MACDFeaturesStrategy:
+    #   description: "Uses MACD indicators."
+    #   parameters:
+    #     lstm_window_size: 12
+    #     macd_fast_period: 12
+    #     macd_slow_period: 26
+    #     macd_signal_period: 9
+
+# --- Model Settings ---
+model_settings:
+  # Default path relative to project_root for saving/loading model artifacts.
+  # Your run_system.py uses project_root_path + this.
+  model_artifact_base_path: "data/models" # Simplified, consistent naming
+  default_lstm_window_size: 10 # Fallback if not in strategy config
+  default_prediction_horizon_days: 2
+  default_training_epochs: 50
+  default_batch_size: 32
+  min_days_prediction_context: 60 # For fetching history for prediction init
+
+# --- General Run Settings (Defaults, can be overridden by CLI or profile YAMLs) ---
+run_settings:
+  mode: "backtest" # Default mode if --mode CLI arg is absent
+  model_scope: "all_stocks_model" # Default scope
+  # tickers_to_predict: Will be overridden by CLI. Can provide a default here for no-arg runs.
+  # Example:
+  tickers_to_predict: ["AAPL"]
+  training_pool_start_date: "2022-01-01" # Overall earliest data for any training
+  force_retrain_models: false # For initial/live model
+
+# --- Backtest Mode Specific Settings ---
+backtest_settings:
+  start_date: "2023-01-01" # Default if --backtest-start-date not given
+  end_date: "2023-01-04"   # Default if --backtest-end-date not given
+  prediction_horizon_days: 2 # Can override model_settings for backtests
+  force_retrain_each_step: false # Default for walk-forward (True means always retrain)
+  use_api_for_data_fetch_in_backtest: false # Default: rely on DB data for backtests
+  data_mode_if_no_api: "ensure_table_only"  # If above is false, what update_all_market_data does
+  strategy: 'TopKLongShortStrategy' # Default strategy for backtests, can be overridden by CLI
+# --- Live Prediction Mode Specific Settings ---
+live_predict_settings:
+  # prediction_horizon_days: 1 # Example: maybe live predictions are shorter horizon
+  force_retrain_models: true # Often true for daily live model updates
+  # Settings for a continuous live engine (if you build one)
+  # live_engine:
+  #   run_continuously: true
+  #   cycle_interval_seconds: 300
+
+# --- Logging Settings ---
+logging:
+  level: "INFO" # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  # log_file_path: "logs/trading_platform.log" # Relative to project root if used
+  # log_to_console: true
+
+# --- Storage Settings (New section for clarity) ---
+storage:
+  # These are relative to project_root_path when used by run_system.py
+  model_artifact_path: "data/models"
+  local_predictions_path: "data/predictions"
+  local_plots_path: "data/plots"
+  local_metrics_path: "data/metrics"
+  # For report generation, if reports are saved locally by default
+  local_reports_output_path: "reports_generated" 
+  # For templates used by report generation or web_app
+  templates_path: "app/templates" # Path to Jinja2 templates if used by backend
+
+# --- Reporting Settings (If you have a separate reporting script/module) ---
+# reporting:
+#   # ... (your previous reporting section was good) ...
+#   cloud_storage:
+#     type: ${REPORT_STORAGE_TYPE_ENV_VAR|local} # e.g., "s3", "gcs", or "local"
+#     bucket_name: ${REPORT_BUCKET_NAME_ENV_VAR}
+#     region: ${REPORT_STORAGE_REGION_ENV_VAR}

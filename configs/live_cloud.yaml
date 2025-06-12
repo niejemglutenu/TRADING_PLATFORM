@@ -1,0 +1,21 @@
+# configs/live_cloud.yaml
+
+# Logging might be more verbose or have different handlers in the cloud
+logging:
+  level: "INFO" 
+
+# Data settings might point to specific cloud resources if different
+# data_settings:
+#   ohlcv_table_name: "live_ohlcv_cloud_table" 
+
+# API settings (though secrets are from env vars, sandbox mode might be set here)
+api_settings:
+  alpaca:
+    sandbox_mode: false # IMPORTANT for live trading
+
+run_settings:
+  force_retrain_models: true # Often true for daily live model update
+
+# storage: # Paths might point to S3 buckets in a cloud setup
+#   model_artifact_path: "s3://my-trading-models-bucket/live_models/"
+#   local_predictions_path: "/mnt/efs/predictions/" # Example if using EFS

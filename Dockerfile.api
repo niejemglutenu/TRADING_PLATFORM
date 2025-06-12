@@ -1,0 +1,22 @@
+# trading_platform/Dockerfile.api (IF this is for a separate API service)
+FROM python:3.11-slim-buster
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /opt/app # Consistent WORKDIR
+
+# Consistent PYTHONPATH
+ENV PYTHONPATH="/opt/app:${PYTHONPATH}"
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY ./app ./app    
+COPY ./configs ./configs
+
+EXPOSE 8000
+
+# Correct CMD for Uvicorn
+# Replace 'app.api.main:app_instance' with your actual FastAPI app path
+CMD ["uvicorn", "app.api.main:app_instance", "--host", "0.0.0.0", "--port", "8000"]

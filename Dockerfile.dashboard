@@ -1,0 +1,24 @@
+# trading_platform/Dockerfile.dashboard
+FROM python:3.11-slim-buster
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+WORKDIR /opt/app
+
+# Set PYTHONPATH to find 'web_dashboard' and potentially 'app' if it imports from core app
+# If web_dashboard imports from app (e.g., app.common.config), /opt/app needs to be on path
+ENV PYTHONPATH="/opt/app:${PYTHONPATH}"
+
+# Install Dash dependencies (might be a separate requirements-dash.txt)
+COPY ./web_dashboard/requirements-dash.txt .
+RUN pip install --no-cache-dir -r requirements-app.txt
+
+# If Dash app needs core app modules (like AppConfig):
+COPY ./app ./app 
+COPY ./configs ./configs
+
+# Copy the Dash application code
+COPY ./web_dashboard ./web_dashboard
+
+EXPOSE 8050
+CMD ["python", "web_dashboard/app.py"]

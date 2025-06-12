@@ -1,0 +1,25 @@
+# trading_platform/Dockerfile (for CLI, consistent with API structure)
+FROM python:3.11-slim-buster
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app # Sets current directory to /app
+
+# PYTHONPATH should point to the directory *containing* your 'app' package.
+# Since we will COPY ./app ./app, our package 'app' will be at /app/app.
+# So, /app needs to be on PYTHONPATH.
+ENV PYTHONPATH="/app:${PYTHONPATH}"
+
+COPY requirements.txt . 
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copies local ./app directory to /app/app in the container
+COPY ./app ./app
+
+# Copies local ./configs directory to /app/configs in the container
+COPY ./configs ./configs
+
+# Default command. Python looks for 'app' package in PYTHONPATH (finds /app/app)
+# then cli.py within it.
+CMD ["python", "app/cli.py", "--help"]

@@ -1,0 +1,16 @@
+
+        <!DOCTYPE html><html><head><title>{{ report_title }}</title><style>body{font-family:sans-serif;} table{border-collapse:collapse;} th,td{border:1px solid #ccc;padding:8px;text-align:left;}</style></head>
+        <body><h1>{{ report_title }}</h1><p>Generated: {{ generation_date }}</p>
+        <h2>CLI Arguments for Report Script:</h2><pre>{{ cli_args_summary | tojson(indent=2) }}</pre>
+        <h2>Overall Metrics:</h2><table><tr><th>Metric</th><th>Value</th></tr>
+        {% for key, value in overall_metrics.items() %}<tr><td>{{key}}</td><td>{{value if value is not none else 'N/A'}}</td></tr>{% endfor %}
+        </table>
+        <h2>Per-Ticker Details:</h2>
+        {% for item in per_ticker_details %}<div><h3>Ticker: {{ item.ticker }}</h3>
+        {% if item.metrics %}<h4>Metrics:</h4><table><tr><th>Metric</th><th>Value</th></tr>
+        {% for mkey, mvalue in item.metrics.items() %}<tr><td>{{mkey}}</td><td>{{mvalue if mvalue is not none else 'N/A'}}</td></tr>{% endfor %}</table>{% endif %}
+        {% if item.plot_url %}<p><img src="{{ item.plot_url }}" alt="Plot for {{ item.ticker }}" style="max-width:800px;"></p>{% else %}<p>No plot available.</p>{% endif %}
+        </div><hr>{% endfor %}
+        {% if predictions_csv_url %}<p><a href="{{ predictions_csv_url }}">Download Predictions CSV</a></p>{% else %}<p>Predictions CSV not available.</p>{% endif %}
+        </body></html>
+        

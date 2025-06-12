@@ -1,0 +1,115 @@
+trading_platform/
+├── app/                             # Core application logic (the "backend" or "engine")
+│   ├── __init__.py
+│   ├── common/
+│   │   ├── __init__.py
+│   │   ├── constants.py             # Global constants, enum-like structures
+│   │   ├── config.py                # Configuration loading and management (Singleton or class)
+│   │   └── utils.py                 # General utility functions, custom logging setup
+│   ├── data_access/                 # Renamed from data_ingestion for broader scope
+│   │   ├── __init__.py
+│   │   ├── db_manager.py            # Connection pooling, direct DB interaction (CRUD)
+│   │   ├── cache_manager.py         # (Optional) Interface for caching (Redis, in-memory)
+│   │   └── providers/               # Data source specific connectors
+│   │       ├── __init__.py
+│   │       ├── base_provider.py     # ABC for data providers
+│   │       ├── db_provider.py       # Implements BaseProvider using db_manager
+│   │       └── alpaca_provider.py   # Example API provider
+│   ├── feature_engineering/
+│   │   ├── __init__.py
+│   │   ├── base_strategy.py         # FeatureEngineeringStrategy ABC
+│   │   └── strategies/              # Directory for different strategy .py files
+│   │       ├── __init__.py
+│   │       ├── returns_features.py  # PastReturnsStrategy
+│   │       └── advanced_features.py # ReturnsVarCorrStrategy, etc.
+│   ├── modeling/
+│   │   ├── __init__.py
+│   │   ├── model_pipeline.py        # train_model_pipeline, prediction_pipeline
+│   │   ├── model_builders.py        # create_lstm_model, etc.
+│   │   ├── iterative_predictor.py   # Generalized iterative prediction logic
+│   │   └── model_store.py           # Interface for saving/loading models (local/cloud)
+│   ├── trading_engine/
+│   │   ├── __init__.py
+│   │   ├── signal_processor.py      # Generates signals from predictions
+│   │   ├── risk_manager.py          # Assesses risk, position sizing
+│   │   ├── order_manager.py         # Creates and manages orders
+│   │   └── execution_service.py     # Interacts with broker_interface
+│   ├── broker_interface/
+│   │   ├── __init__.py
+│   │   ├── base_broker.py           # ABC for broker connections
+│   │   └── alpaca_broker.py         # Example concrete broker
+│   ├── backtester/
+│   │   ├── __init__.py
+│   │   ├── engine.py                # Walk-forward backtesting engine
+│   │   └── metrics.py               # Performance evaluation
+│   ├── orchestrator/                # High-level workflows
+│   │   ├── __init__.py
+│   │   ├── workflows.py             # Defines live_trading_workflow, backtest_workflow
+│   │   └── task_scheduler.py        # (Optional) If building custom scheduling
+│   └── cli.py                       # Command Line Interface (replaces main_cli.py)
+│
+├── configs/                         # All configuration files
+│   ├── base.yaml                    # Common settings, logging, DB (can be overridden)
+│   ├── feature_strategies.yaml      # Definitions of feature sets and their parameters
+│   ├── live.yaml                    # Overrides for live trading
+│   ├── backtest_default.yaml        # Default backtest settings
+│   └── backtests/                   # Directory for specific, named backtest configurations
+│       └── my_aapl_corr_backtest.yaml
+│
+├── services/                        # (Optional) For local Docker Compose definitions
+│   └── docker-compose.yml           # e.g., for PostgreSQL, Redis
+│
+├── tests/                           # Unit and integration tests
+│   ├── __init__.py
+│   ├── conftest.py                  # Pytest fixtures
+│   └── ... (mirroring app/ structure)
+│
+├── web_app/                         # Placeholder for future web application (e.g., Flask/Django/FastAPI)
+│   ├── __init__.py
+│   ├── static/
+│   ├── templates/
+│   └── main.py                      # Web server entry point
+│
+├── scripts/                         # Utility and maintenance scripts
+│   ├── setup_db.sh
+│   └── run_migrations.py
+│
+├── data/                            # Local data storage (for dev/cache, or if not using cloud)
+│   ├── cache/
+│   ├── models/
+│   ├── backtest_results/
+│
+├── logs/                            # Local log storage
+│
+├── Dockerfile                       # To build the core application container
+├── Dockerfile.web                   # (Optional) If web app is a separate service
+├── requirements.txt                 # Core application Python dependencies
+├── requirements-dev.txt             # Dev dependencies (pytest, linters, etc.)
+├── .env.example                     # Example for environment variables (secrets)
+├── .gitignore
+└── README.md
+
+
+
+
+
+
+
+
+
+
+
+docker-compose run --rm backtest-runner \
+  python -m app.cli \
+    --base-config "app_config.yaml" \
+    --mode "backtest" \
+    --model-scope "single_stock_model" \
+    --tickers-to-predict "AAPL" \
+    --feature-strategy-key "ReturnsVarCorrStrategy" \
+    --training-pool-start-date "2022-01-01" \
+    --backtest-start-date "2023-01-01" \
+    --backtest-end-date "2023-01-15" \
+    --prediction-horizon-days 2 \
+    --force-retrain-models \
+    --log-level "DEBUG" \
+    --output-artifacts-json

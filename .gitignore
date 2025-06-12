@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv/
+*.sqlite3
+
+# Virtual environments
+env/
+venv/
+*.egg-info/
+
+# Logs
+*.log
+
+# Jupyter / Notebook
+.ipynb_checkpoints
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.pid
+docker-compose.override.yml
+*.log
+
+# DB
+data/
+db.sqlite
+*.db
+
+# VSCode or other IDEs
+.vscode/
+.idea/
