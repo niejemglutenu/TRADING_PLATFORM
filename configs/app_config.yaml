@@ -21,30 +21,148 @@ api_settings:
     api_key: ${ALPACA_API_KEY_ENV_VAR}
     api_secret: ${ALPACA_API_SECRET_ENV_VAR}
     # For live trading, this would be set to 'false' via environment variable
-    sandbox_mode: ${ALPACA_SANDBOX_MODE_ENV_VAR|true} # Default to sandbox is safer for dev/testing
+    sandbox_mode: ${ALPACA_SANDBOX_MODE_ENV_VAR|false} # Default to sandbox is safer for dev/testing
     data_feed: ${ALPACA_DATA_FEED_ENV_VAR|iex} # Default Alpaca data feed (iex or sip)
   # polygon_io:
   #   api_key: ${POLYGON_API_KEY_ENV_VAR}
 
 # --- Data Settings ---
 data_settings:
-  ohlcv_table_name: ${OHLCV_TABLE_NAME_ENV_VAR|NAS100} # Default OHLCV table name, can be overridden
+  ohlcv_table_name: ${OHLCV_TABLE_NAME_ENV_VAR|nas100} # Default OHLCV table name, can be overridden
   default_timeframe: "1Day" # Alpaca/Polygon compatible (e.g., 1Min, 5Min, 1Hour, 1Day)
   
   # List of all symbols the system *might* ever care about for data ingestion tasks
   # This could be a very broad list.
-  universe_symbols_for_ingestion: 
-    - "AAPL"
-    - "MSFT"
-    - "GOOGL"
-    - "AMZN"
-    - "NVDA"
-    - "NDAQ" # Example using a common symbol for Nasdaq 100 index
-    # - "^GSPC" # S&P 500
+  #universe_symbols_for_ingestion: 
+  #  - "NDAQ"
+  #  - "AAPL"
+  #  - "MSFT"
+  #  - "GOOGL"
+  #  - "AMZN"
+  #  - "NVDA"
+  #  - "TSLA"
+  #  - "META"
+
+    
+  universe_symbols_for_ingestion:
+  - "SPY"
+  - "NDAQ"
+  - "AAPL"
+  - "MSFT"
+  - "GOOGL"
+  - "AMZN"
+  - "NVDA"
+  - "TSLA"
+  - "META"
+  - "AVGO"
+  - "PEP"
+  - "COST"
+  - "CSCO"
+  - "ADBE"
+  - "TMUS"
+  - "TXN"
+  - "NFLX"
+  - "QCOM"
+  - "INTC"
+  - "AMD"
+  - "AMGN"
+  - "HON"
+  - "SBUX"
+  - "BKNG"
+  - "MRNA"
+  - "ADI"
+  - "MDLZ"
+  - "MU"
+  - "VRTX"
+  - "GILD"
+  - "ISRG"
+  - "ABNB"
+  - "LRCX"
+  - "REGN"
+  - "SNPS"
+  - "PANW"
+  - "ASML"
+  - "CHTR"
+  - "KLAC"
+  - "FTNT"
+  - "DXCM"
+  - "CDNS"
+  - "MNST"
+  - "ADP"
+  - "CTSH"
+  - "CRWD"
+  - "ZS"
+  - "IDXX"
+  - "AEP"
+  - "PAYX"
+  - "MAR"
+  - "MCHP"
+  - "EXC"
+  - "ODFL"
+  - "PDD"
+  - "WBD"
+  - "KDP"
+  - "ORLY"
+  - "LCID"
+  - "ROST"
+  - "PCAR"
+  - "XEL"
+  - "EA"
+  - "BIIB"
+  - "FAST"
+  - "DLTR"
+  - "WBA"
+  - "CTAS"
+  - "SGEN"
+  - "BKR"
+  - "ANSS"
+  - "CPRT"
+  - "TEAM"
+  - "OKTA"
+  - "NXPI"
+  - "FISV"
+  - "VRSK"
+  - "AKAM"
+  - "CDW"
+  - "CEG"
+  - "SIRI"
+  - "DDOG"
+  - "ENPH"
+  - "MTCH"
+  - "BILL"
+  - "NTES"
+  - "VRSN"
+  - "TSCO"
+  - "PTC"
+  - "GEN"
+  - "CRL"
+  - "EPAM"
+  - "ALGN"
+  - "CHKP"
+  - "SWKS"
+  - "TECH"
+  - "CSGP"
+  - "ZM"
+  - "DOCU"
+  - "SPLK"
+
+#STOCKS_ALL = [
+ #           "NDAQ", "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META"#, "AVGO", "PEP", "COST",
+            #"CSCO", "ADBE", "TMUS", "TXN", "NFLX", "QCOM", "INTC", "AMD", "AMGN", "HON",
+            #"SBUX", "BKNG", "MRNA", "ADI", "MDLZ", "MU", "VRTX", "GILD", "ISRG", "ABNB",
+            #"LRCX", "REGN", "SNPS", "PANW", "ASML", "CHTR", "KLAC", "FTNT", "DXCM", "CDNS",
+            #"MNST", "ADP", "CTSH", "CRWD", "ZS", "IDXX", "AEP", "PAYX", "MAR", "MCHP",
+            #"EXC", "ODFL", "PDD", "WBD", "KDP", "ATVI", "ORLY", "LCID", "ROST", "PCAR",
+            #"XEL", "EA", "BIIB", "FAST", "DLTR", "WBA", "CTAS", "SGEN", "BKR", "ANSS",
+            #"CPRT", "TEAM", "OKTA", "NXPI", "FISV", "VRSK", "AKAM", "CDW", "CEG", "SIRI",
+            #"DDOG", "ENPH", "MTCH", "BILL", "NTES", "VRSN", "TSCO", "PTC", "GEN", "CRL",
+            #"EPAM", "ALGN", "CHKP", "SWKS", "TECH", "CSGP", "ZM", "DOCU", "SPLK"]
+
+
   
   # Specific index ticker used for correlation features or as a benchmark by strategies/evaluation.
   # This should be one of the symbols included in universe_symbols_for_ingestion.
-  primary_index_ticker: "NDAQ" # Or your chosen primary index
+  primary_index_ticker: "SPY" # Or your chosen primary index
   
   # Default start date for fetching historical data when a symbol is newly added to the system.
   default_ingestion_start_date: "2018-01-01"
@@ -56,46 +174,130 @@ data_settings:
   # STOCKS_ALL: Define here if it's a fixed list for 'all_stocks_model' training scope.
   # This can also be managed/overridden by more specific backtest/live profiles.
   STOCKS_ALL: # Used if model_scope is "all_stocks_model"
-    - "AAPL"
-    - "MSFT"
-    - "GOOGL"
-    - "AMZN"
-    - "NVDA"
-    - "NDAQ"
-    # - "^NDX" # Optionally include index if it's part of an "all features" model
+  - "SPY"
+  - "NDAQ"
+  - "AAPL"
+  - "MSFT"
+  - "GOOGL"
+  - "AMZN"
+  - "NVDA"
+  - "TSLA"
+  - "META"
+  - "AVGO"
+  - "PEP"
+  - "COST"
+  - "CSCO"
+  - "ADBE"
+  - "TMUS"
+  - "TXN"
+  - "NFLX"
+  - "QCOM"
+  - "INTC"
+  - "AMD"
+  - "AMGN"
+  - "HON"
+  - "SBUX"
+  - "BKNG"
+  - "MRNA"
+  - "ADI"
+  - "MDLZ"
+  - "MU"
+  - "VRTX"
+  - "GILD"
+  - "ISRG"
+  - "ABNB"
+  - "LRCX"
+  - "REGN"
+  - "SNPS"
+  - "PANW"
+  - "ASML"
+  - "CHTR"
+  - "KLAC"
+  - "FTNT"
+  - "DXCM"
+  - "CDNS"
+  - "MNST"
+  - "ADP"
+  - "CTSH"
+  - "CRWD"
+  - "ZS"
+  - "IDXX"
+  - "AEP"
+  - "PAYX"
+  - "MAR"
+  - "MCHP"
+  - "EXC"
+  - "ODFL"
+  - "PDD"
+  - "WBD"
+  - "KDP"
+  - "ORLY"
+  - "LCID"
+  - "ROST"
+  - "PCAR"
+  - "XEL"
+  - "EA"
+  - "BIIB"
+  - "FAST"
+  - "DLTR"
+  - "WBA"
+  - "CTAS"
+  - "SGEN"
+  - "BKR"
+  - "ANSS"
+  - "CPRT"
+  - "TEAM"
+  - "OKTA"
+  - "NXPI"
+  - "FISV"
+  - "VRSK"
+  - "AKAM"
+  - "CDW"
+  - "CEG"
+  - "SIRI"
+  - "DDOG"
+  - "ENPH"
+  - "MTCH"
+  - "BILL"
+  - "NTES"
+  - "VRSN"
+  - "TSCO"
+  - "PTC"
+  - "GEN"
+  - "CRL"
+  - "EPAM"
+  - "ALGN"
+  - "CHKP"
+  - "SWKS"
+  - "TECH"
+  - "CSGP"
+  - "ZM"
+  - "DOCU"
+  - "SPLK"
+#    # - "^NDX" # Optionally include index if it's part of an "all features" model
 
-# --- Feature Engineering Settings ---
+# In configs/app_config.yaml
+
 feature_engineering:
-  default_strategy_key: "ReturnsVariationStrategy" # Default strategy if not specified by CLI
+  default_strategy_key: "ReturnsVariationStrategy"
   strategies_config:
-    # Keys MUST match the class names of your FeatureEngineeringStrategy implementations
     PastReturnsStrategy:
       description: "Uses only past returns as features."
-      parameters: # Parameters specific to this strategy's __init__ or generate_features
-        lstm_window_size: 10 
+      parameters:
+        lstm_window_size: 10
     ReturnsVariationStrategy:
-      description: "Uses past returns and their rolling standard deviation."
+      description: "Uses past returns and their rolling standard deviation (volatility)."
       parameters:
         lstm_window_size: 10
         variation_window: 10
         min_periods_variation: 5
-    ReturnsVarCorrStrategy:
-      description: "Returns, variation, and correlation with the primary_index_ticker."
+    ReturnsRelativeStrengthStrategy: # <-- NEW NAME
+      description: "Returns, volatility, and relative strength vs. the primary index."
       parameters:
         lstm_window_size: 10
         variation_window: 10
         min_periods_variation: 5
-        correlation_window: 20
-        min_periods_correlation: 10
-        # index_ticker_symbol: # No need to specify here, it will use data_settings.primary_index_ticker
-    # Example for a new strategy:
-    # MACDFeaturesStrategy:
-    #   description: "Uses MACD indicators."
-    #   parameters:
-    #     lstm_window_size: 12
-    #     macd_fast_period: 12
-    #     macd_slow_period: 26
-    #     macd_signal_period: 9
+        # No extra parameters needed for relative strength, but you could add them here.
 
 # --- Model Settings ---
 model_settings:
@@ -114,7 +316,20 @@ run_settings:
   model_scope: "all_stocks_model" # Default scope
   # tickers_to_predict: Will be overridden by CLI. Can provide a default here for no-arg runs.
   # Example:
-  tickers_to_predict: ["AAPL"]
+  #tickers_to_predict: ["AAPL"]
+  tickers_to_predict: ["SPY","NDAQ", "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META", "AVGO", "PEP", "COST",
+    "CSCO", "ADBE", "TMUS", "TXN", "NFLX", "QCOM", "INTC", "AMD", "AMGN", "HON",
+    "SBUX", "BKNG", "MRNA", "ADI", "MDLZ", "MU", "VRTX", "GILD", "ISRG", "ABNB",
+    "LRCX", "REGN", "SNPS", "PANW", "ASML", "CHTR", "KLAC", "FTNT", "DXCM", "CDNS",
+    "MNST", "ADP", "CTSH", "CRWD", "ZS", "IDXX", "AEP", "PAYX", "MAR", "MCHP",
+    "EXC", "ODFL", "PDD", "WBD", "KDP", "ORLY", "LCID", "ROST", "PCAR",
+    "XEL", "EA", "BIIB", "FAST", "DLTR", "WBA", "CTAS", "SGEN", "BKR", "ANSS",
+    "CPRT", "TEAM", "OKTA", "NXPI", "FISV", "VRSK", "AKAM", "CDW", "CEG", "SIRI",
+    "DDOG", "ENPH", "MTCH", "BILL", "NTES", "VRSN", "TSCO", "PTC", "GEN", "CRL",
+    "EPAM", "ALGN", "CHKP", "SWKS", "TECH", "CSGP", "ZM", "DOCU", "SPLK"]
+  
+
+
   training_pool_start_date: "2022-01-01" # Overall earliest data for any training
   force_retrain_models: false # For initial/live model
 

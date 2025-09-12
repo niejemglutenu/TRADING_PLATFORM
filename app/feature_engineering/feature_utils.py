@@ -7,7 +7,6 @@ def create_X_Y_sequenced_for_training(data_df: pd.DataFrame, feature_cols: List[
     X, Y = [], []
     if len(data_df) < window_size + 1: return np.array(X), np.array(Y)
     
-    # Ensure numeric types and column existence
     for col in feature_cols + [target_col]:
         if col not in data_df.columns:
             logging.error(f"Sequencing Error: Column '{col}' not found in DataFrame. Available: {data_df.columns.tolist()}")
@@ -19,13 +18,12 @@ def create_X_Y_sequenced_for_training(data_df: pd.DataFrame, feature_cols: List[
             return np.array([]), np.array([])
 
     feature_data_np = data_df[feature_cols].values
-    target_data_np = data_df[target_col].values # Use .values for direct numpy array
+    target_data_np = data_df[target_col].values 
 
-    for i in range(window_size, len(data_df)): # Correct range for target access
+    for i in range(window_size, len(data_df)): 
         sequence_x = feature_data_np[i - window_size:i, :]
         X.append(sequence_x)
-        # Target corresponds to the value *after* the sequence X ends
-        # If X is features [t-window_size...t-1], Y is target at t-1 (which is future return for day t)
-        Y.append(target_data_np[i-1]) # if target_data_np[i-1] is target FOR data at index i of original df (return of i+1)
 
+        Y.append(target_data_np[i-1]) 
     return np.array(X), np.array(Y)
+

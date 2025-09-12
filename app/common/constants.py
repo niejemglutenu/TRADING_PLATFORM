@@ -1,55 +1,204 @@
-# src/trading_system/common/constants.py
+# trading_platform/app/common/constants.py
+import os
+from pathlib import Path
+import logging
 
-# --- Feature Name Constants ---
-# These define the canonical names for features used throughout the system.
-FEATURE_CLOSE = 'close'
-FEATURE_OPEN = 'open'
-FEATURE_HIGH = 'high'
-FEATURE_LOW = 'low'
-FEATURE_VOLUME = 'volume'
-FEATURE_RETURNS = 'returns'
-FEATURE_TARGET = 'target'       # Default name for the prediction target column
-FEATURE_VARIATION = 'variation'
-FEATURE_CORRELATION = 'correlation'
-# Example: FEATURE_RSI = 'rsi'
-# Example: FEATURE_MACD = 'macd'
+# ==============================================================================
+# 1. CORE PROJECT PATHS
+# ==============================================================================
+# Assumes this file is in trading_platform/app/common/
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+DATA_DIR = PROJECT_ROOT / "data"
+LOG_DIR = PROJECT_ROOT / "logs"
+CONFIG_DIR = PROJECT_ROOT / "configs"
 
-# --- Default Operational Parameters ---
-# These are sensible defaults if not specified in any configuration.
-# For specific runs, these should ideally be set in a config file or via CLI.
+# ==============================================================================
+# 2. DATA SUBDIRECTORIES (Single Source of Truth)
+# ==============================================================================
+DB_DIR = DATA_DIR / "db"
+MODELS_DIR = DATA_DIR / "models"
+METRICS_DIR = DATA_DIR / "metrics"
+PLOTS_DIR = DATA_DIR / "plots"
+RAW_PREDICTIONS_DIR = DATA_DIR / "raw_predictions"
+MERGED_EVAL_DIR = DATA_DIR / "merged_evaluation_data"
+EQUITY_CURVE_DIR = DATA_DIR / "equity_curve_data"
 
-DEFAULT_PREDICT_DAYS = 2
-MIN_DAYS_FOR_PREDICTION_CONTEXT = 60 # Min history for initializing prediction sequences
-DEFAULT_LSTM_WINDOW_SIZE = 10        # A very common default if a strategy doesn't specify
+# ==============================================================================
+# 3. DIRECTORY & PATH HELPER FUNCTIONS (Consistent Naming)
+# ==============================================================================
+def get_plots_dir() -> Path:
+    """Gets the path for the main plots directory."""
+    return PLOTS_DIR
+def get_models_dir() -> Path:
+    return MODELS_DIR
 
-# --- Default Configuration Keys/Values (Used by main_cli.py if config is missing sections) ---
-MODE_DEFAULT = "backtest"
-MODEL_SCOPE_DEFAULT = "single_stock_model"
-FEATURE_STRATEGY_KEY_DEFAULT = "ReturnsVariationStrategy" # Default strategy to use
-LOG_LEVEL_DEFAULT = "INFO"
+def get_metrics_dir() -> Path:
+    return METRICS_DIR
 
-# --- Default File/Path Names (Less common to override via CLI, more via main config) ---
-DEFAULT_MODEL_SUBDIR = "models"
-DEFAULT_CACHE_SUBDIR = "cache"
-DEFAULT_LOGS_SUBDIR = "logs"
-DEFAULT_REPORTS_SUBDIR = "reports"
-DEFAULT_TEMPLATES_SUBDIR = "templates" # For report templates
+def get_raw_predictions_filepath(run_id: str) -> Path:
+    """Gets the path for the raw (unmerged) predictions CSV file."""
+    return RAW_PREDICTIONS_DIR / f"predictions_{run_id}.csv"
 
-# --- Default Evaluation Target ---
-# This defines what column in the "actuals" data the predictions are compared against.
-# It should align with what your models are trained to predict (self.target_name in strategies).
-DEFAULT_EVALUATION_TARGET_COLUMN = FEATURE_RETURNS # If predicting next day's raw return
-# DEFAULT_EVALUATION_TARGET_COLUMN = FEATURE_TARGET # If target is pre-shifted (less common for direct eval)
+def get_merged_eval_filepath(run_id: str) -> Path:
+    """Gets the path for the merged evaluation data CSV file."""
+    return MERGED_EVAL_DIR / f"merged_eval_{run_id}.csv"
 
-# --- Default Index Ticker (can be overridden in config) ---
-DEFAULT_INDEX_TICKER_SYMBOL = "NDAQ" # e.g., NASDAQ Composite
-# DEFAULT_INDEX_TICKER_SYMBOL = "SPY"   # e.g., S&P 500 ETF
+def get_metrics_filepath(run_id: str) -> Path:
+    """Gets the path for the main metrics JSON file for a given run."""
+    return METRICS_DIR / f"metrics_{run_id}.json"
 
-# --- Default Table Names (can be overridden in config) ---
-DEFAULT_OHLCV_TABLE_NAME = "NAS100"
+def get_plot_filepath(run_id: str, plot_name: str) -> Path:
+    """Gets the path for a specific plot image for a given run."""
+    return PLOTS_DIR / f"plot_{plot_name}_{run_id}.png"
 
-# --- Default Column Names from Raw Data Sources (if you have a mapping layer) ---
-# RAW_SOURCE_TIMESTAMP_COL = 't'
-# RAW_SOURCE_CLOSE_COL = 'c'
-# (Your fetch_and_cache_data_incrementally already expects 'timestamp', 'close', etc.
-#  If fetching from diverse APIs, you might have a mapping step before caching).
+def get_equity_curve_filepath(run_id: str) -> Path:
+    """Returns the path to the equity curve CSV for a given run."""
+    return EQUITY_CURVE_DIR / f"equity_curve_{run_id}.csv"
+
+# ==============================================================================
+# 4. DIRECTORY SETUP UTILITY
+# ==============================================================================
+def setup_all_directories():
+    """Creates all necessary data directories if they don't exist."""
+    dirs_to_create = [
+        DATA_DIR, LOG_DIR, DB_DIR, MODELS_DIR, METRICS_DIR, PLOTS_DIR,
+        RAW_PREDICTIONS_DIR, MERGED_EVAL_DIR, EQUITY_CURVE_DIR
+    ]
+    for dir_path in dirs_to_create:
+        try:
+            dir_path.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logging.getLogger(__name__).error(f"Error creating directory {dir_path}: {e}")
+
+# ==============================================================================
+# 5. DEFAULT OPERATIONAL PARAMETERS
+# ==============================================================================
+DEFAULT_OHLCV_TABLE_NAME = "ohlcv_data"
+MIN_DAYS_FOR_PREDICTION_CONTEXT = 100
+DEFAULT_INITIAL_CAPITAL = 100000.0
+STATUS_UPDATE_PREFIX = "GUI_STATUS_UPDATE::"
+
+# ==============================================================================
+# 6. STRATEGY REGISTRY (Single Source of Truth)
+# ==============================================================================
+
+# All available portfolio strategies
+PORTFOLIO_STRATEGIES = {
+    # Historic strategies (based on historical data only)
+    'MarkowitzHistoric': 'MarkowitzHistoric',
+    'MarkowitzHistoricEfficientReturn': 'MarkowitzHistoricEfficientReturn', 
+    'MinSemiVarianceHistoric': 'MinSemiVarianceHistoric',
+    'MeanCVaRHistoric': 'MeanCVaRHistoric',
+    
+    # Predictive strategies (require ML predictions)
+    'MarkowitzPredicted': 'MarkowitzPredicted',
+    'EnhancedMarkowitzPredicted': 'EnhancedMarkowitzPredicted',
+    'TopKPredicted': 'TopKPredicted',
+    'MinSemiVariancePredicted': 'MinSemiVariancePredicted',
+    'MinCVaRPredicted': 'MinCVaRPredicted',
+    'PredictiveMomentumFilter': 'PredictiveMomentumFilter'
+}
+
+# Strategy classifications for easy filtering
+HISTORIC_STRATEGIES = [
+    'MarkowitzHistoric',
+    'MarkowitzHistoricEfficientReturn', 
+    'MinSemiVarianceHistoric',
+    'MeanCVaRHistoric'
+]
+
+PREDICTIVE_STRATEGIES = [
+    'MarkowitzPredicted',
+    'EnhancedMarkowitzPredicted',
+    'TopKPredicted',
+    'MinSemiVariancePredicted',
+    'MinCVaRPredicted',
+    'PredictiveMomentumFilter'
+]
+
+# All strategy classes (including base and intermediate classes)
+ALL_STRATEGY_CLASSES = {
+    # Base classes
+    'PortfolioStrategy': 'PortfolioStrategy',
+    'HistoricPortfolioStrategy': 'HistoricPortfolioStrategy',
+    'PredictedPortfolioStrategy': 'PredictedPortfolioStrategy',
+    'MarketAwareHistoricStrategy': 'MarketAwareHistoricStrategy',
+    
+    # Concrete historic strategies
+    'MarkowitzHistoric': 'MarkowitzHistoric',
+    'MarkowitzHistoricEfficientReturn': 'MarkowitzHistoricEfficientReturn', 
+    'MinSemiVarianceHistoric': 'MinSemiVarianceHistoric',
+    'MeanCVaRHistoric': 'MeanCVaRHistoric',
+    
+    # Concrete predictive strategies
+    'MarkowitzPredicted': 'MarkowitzPredicted',
+    'EnhancedMarkowitzPredicted': 'EnhancedMarkowitzPredicted',
+    'PredictiveMomentumFilter': 'PredictiveMomentumFilter'
+}
+
+# Feature engineering strategies
+FEATURE_ENGINEERING_STRATEGIES = [
+    'PastReturnsStrategy',
+    'ReturnsVariationStrategy', 
+    'ReturnsRelativeStrengthStrategy',
+    'TechnicalIndicatorsForReturn',
+    'TechnicalIndicatorsForSharpe'
+]
+
+# Helper functions for strategy validation
+def is_historic_strategy(strategy_name: str) -> bool:
+    """Check if a strategy is historic (doesn't require predictions)."""
+    return strategy_name in HISTORIC_STRATEGIES
+
+def is_predictive_strategy(strategy_name: str) -> bool:
+    """Check if a strategy is predictive (requires ML predictions)."""
+    return strategy_name in PREDICTIVE_STRATEGIES
+
+def get_all_portfolio_strategies() -> list:
+    """Get all available portfolio strategy names."""
+    return list(PORTFOLIO_STRATEGIES.keys())
+
+def get_historic_strategies() -> list:
+    """Get all historic strategy names."""
+    return HISTORIC_STRATEGIES.copy()
+
+def get_predictive_strategies() -> list:
+    """Get all predictive strategy names."""
+    return PREDICTIVE_STRATEGIES.copy()
+
+def get_feature_engineering_strategies() -> list:
+    """Get all feature engineering strategy names."""
+    return FEATURE_ENGINEERING_STRATEGIES.copy()
+
+def validate_portfolio_strategy(strategy_name: str) -> bool:
+    """Validate if a strategy name is valid."""
+    return strategy_name in PORTFOLIO_STRATEGIES
+
+def validate_feature_strategy(strategy_name: str) -> bool:
+    """Validate if a feature engineering strategy name is valid."""
+    return strategy_name in FEATURE_ENGINEERING_STRATEGIES
+
+def get_all_strategy_classes() -> dict:
+    """Get all strategy classes including base and intermediate classes."""
+    return ALL_STRATEGY_CLASSES.copy()
+
+def get_concrete_strategies() -> list:
+    """Get only the concrete (implemented) strategy names (excluding base classes)."""
+    return list(PORTFOLIO_STRATEGIES.keys())
+
+def get_base_strategy_classes() -> list:
+    """Get base and intermediate strategy class names."""
+    return [
+        'PortfolioStrategy',
+        'HistoricPortfolioStrategy', 
+        'PredictedPortfolioStrategy',
+        'MarketAwareHistoricStrategy'
+    ]
+
+def is_base_strategy_class(strategy_name: str) -> bool:
+    """Check if a strategy name is a base/intermediate class."""
+    return strategy_name in get_base_strategy_classes()
+
+def is_concrete_strategy(strategy_name: str) -> bool:
+    """Check if a strategy name is a concrete (implemented) strategy."""
+    return strategy_name in PORTFOLIO_STRATEGIES

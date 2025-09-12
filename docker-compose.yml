@@ -14,8 +14,10 @@ x-cli-app-base: &cli-app-base
     - ./configs:/opt/app/configs # Mounts local configs to /opt/app/configs
     - ./data:/opt/app/data 
     - ./logs:/opt/app/logs     # For logs on host
+    - ./data/matplotlib_cache:/opt/app/data/matplotlib_cache
   environment:
   - PYTHONUNBUFFERED=1
+  - MPLCONFIGDIR=/opt/app/data/matplotlib_cache
   - DB_HOST=host.docker.internal         # ✅ Correct name
   - DB_NAME=${DB_NAME_ENV_VAR}
   - DB_USER=${DB_USER_ENV_VAR}
@@ -46,84 +48,28 @@ services:
   backtest-runner:
     <<: *cli-app-base # Inherit common CLI app settings
     container_name: trading_platform_backtester
-    # No 'image:' line here for typical local development.
-    # Docker Compose will build an image named e.g., 'trading_platform_backtest-runner'.
     command: > # Default command if 'docker-compose up backtest-runner' is used
       python -m app.cli
-      --mount 
       --mode "backtest" 
       --base-config "app_config.yaml"
       --profile-config "app_config.yaml" 
     volumes:
       - ./app:/opt/app/app
-
-    restart: "no"
-    
-
-  
-  live-scheduler: # For batch live predictions
-    <<: *cli-app-base
-    container_name: trading_platform_live_scheduler
-    command: >
-      python -m app.cli 
-      --mode "live_predict" 
-      --base-config "app_config.yaml"
-      --profile-config "app_config.yaml"
-      --force-retrain-models # Often true for daily live runs
-      --log-level "INFO"
-    # restart: unless-stopped # Consider if this service is managed by an external scheduler
-
-
-  # --- Optional Live Trading API Service (if you have one) ---
-  # live-api-service:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile.api # Uses the separate Dockerfile for the API
-  #   container_name: trading_platform_live_api
-  #   volumes: # Similar volumes for dev, but configs might be different if API has its own
-  #     - ./app:/app/app
-  #     - ./configs:/app/configs # API might use a specific live_api.yaml profile
-  #     - ./logs:/app/logs
-  #   ports:
-  #     - "8000:8000" # Expose API port
-  #   environment:
-  #     # Same DB and API key env vars as cli-app-base
-  #     - PYTHONUNBUFFERED=1
-  #     - DB_HOST_ENV_VAR=db
-  #     # ... other env vars ...
-  #     - ALPACA_API_KEY_ENV_VAR=${ALPACA_API_KEY_ENV_VAR:?err_alpaca_key_not_set}
-  #     # ...
-  #   depends_on:
-  #     db:
-  #       condition: service_healthy
-  #   restart: unless-stopped
-    # networks:
-    #   - tradingnet
-
-
-# networks:
-#   tradingnet:
-#     driver: bridge
-
-
-
-  dashboard: # NEW SERVICE FOR DASH
-    build:
-      context: . # Can use the same context if Dash deps are in main requirements.txt
-      dockerfile: Dockerfile.dashboard # OR use a separate Dockerfile for Dash if deps differ
-    container_name: trading_platform_dashboard
-    volumes: # Needs access to the artifacts and its own code
-      - ./web_dashboard:/opt/app/web_dashboard # Mount Dash app code
-      - ./data:/opt/app/data                 # Access to backtest results
-      - ./configs:/opt/app/configs           # If Dash AppConfig needs it
-    ports:
-      - "8050:8050" # Expose Dash app on host port 8050
+      - ./configs:/opt/app/configs
+      - ./data:/opt/app/data:rw
+      - ./logs:/opt/app/logs:rw
+      - ./data/matplotlib_cache:/opt/app/data/matplotlib_cache:rw
     environment:
       - PYTHONUNBUFFERED=1
-      # If Dash AppConfig needs DB/API keys (e.g., to show live account status), pass them
-      # - DB_HOST_ENV_VAR=${DB_HOST_ENV_VAR:-db} # etc.
-      # Could also set a specific profile for Dash AppConfig
-      # - APP_CONFIG_PROFILE=dashboard_profile 
-    # depends_on: # Only if it needs db for its own operations directly
-    #   - db 
-    command: ["python", "web_dashboard/app.py"] # Command to start Dash server
+      - MPLCONFIGDIR=/opt/app/data/matplotlib_cache
+      - DB_HOST=host.docker.internal
+      - DB_NAME=${DB_NAME_ENV_VAR}
+      - DB_USER=${DB_USER_ENV_VAR}
+      - DB_PASSWORD=${DB_PASSWORD_ENV_VAR}
+      - ALPACA_API_KEY=${ALPACA_API_KEY_ENV_VAR}
+      - ALPACA_API_SECRET=${ALPACA_API_SECRET_ENV_VAR}
+      - ALPACA_SANDBOX_MODE=${ALPACA_SANDBOX_MODE_ENV_VAR}
+      - DATA_DIR=/opt/app/data  
+    restart: "no"
+
+  

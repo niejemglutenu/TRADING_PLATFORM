@@ -3,6 +3,8 @@ import yaml
 import os
 import logging
 from typing import Optional, Dict, Any, Union, List
+import stat
+from pathlib import Path
 
 logger_cfg = logging.getLogger(__name__) # Use a specific logger for this module
 
@@ -70,6 +72,12 @@ class AppConfig:
             return
 
         AppConfig._project_root_path = project_root
+        
+        # Initialize matplotlib cache directory
+        matplotlib_cache_dir = Path(project_root) / "data" / "matplotlib_cache"
+        matplotlib_cache_dir.mkdir(parents=True, exist_ok=True)
+        os.environ['MPLCONFIGDIR'] = str(matplotlib_cache_dir)
+        
         config_dir = os.path.join(AppConfig._project_root_path, "configs")
         
         final_config: Dict[str, Any] = {}
@@ -155,3 +163,39 @@ class AppConfig:
             return default
         except TypeError: # Value became non-subscriptable (e.g., None) during path traversal
             return default
+
+    def update_gui_from_status_data(self, status_data: Dict[str, Any]):
+        # Add more detailed status information
+        if 'error' in status_data:
+            self.status_label.setText(f"Error: {status_data['error']}")
+            self.status_label.setStyleSheet("color: red;")
+        elif 'warning' in status_data:
+            self.status_label.setText(f"Warning: {status_data['warning']}")
+            self.status_label.setStyleSheet("color: orange;")
+        else:
+            self.status_label.setText(f"Status: {status_data.get('status', 'Unknown')}")
+            self.status_label.setStyleSheet("color: black;")
+
+def ensure_directory_permissions(directory: Path) -> bool:
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        # More granular permission setting
+        if os.name == 'nt':  # Windows
+            import win32security
+            # Set Windows-specific permissions
+            pass
+        else:  # Unix-like
+            os.chmod(directory, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
+        return True
+    except Exception as e:
+        logger_cfg.error(f"Failed to set permissions for directory {directory}: {e}")
+        return False
+
+def _convert_container_path_to_host(container_path: str) -> Path:
+    if not container_path:
+        return Path()
+    # Remove /opt/app or /app prefix
+    for prefix in ['/opt/app/', '/app/']:
+        if container_path.startswith(prefix):
+            container_path = container_path[len(prefix):]
+    return Path(AppConfig.get_project_root()) / container_path

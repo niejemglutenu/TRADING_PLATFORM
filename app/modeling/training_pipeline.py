@@ -1,236 +1,414 @@
-# trading_platform/app/modeling/training_pipeline.py
 import logging
 import os
 import pandas as pd
 import numpy as np
-import joblib
 from sklearn.preprocessing import StandardScaler
-from typing import List, Optional, Tuple, Any
-import keras # Or from tensorflow import keras
+from typing import List, Optional, Tuple, Dict
+from pathlib import Path
 
-from app.data_ingestion.db_manager import DataManager # Import your DataManager
+from app.data_ingestion.db_manager import DataManager
 from app.feature_engineering.strategies import FeatureEngineeringStrategy
-# Example for isinstance check, or rely on feature_engineer.get_feature_names()
-from app.feature_engineering.strategies import ReturnsVarCorrStrategy
-from app.modeling.model_builders import create_lstm_model # Your LSTM model creation function
-# Assuming create_X_Y_sequenced_for_training is moved or accessible, e.g., from a utils module
-# For now, let's assume it's in a modeling_utils.py or similar if not part of this file.
-# from app.modeling.modeling_utils import create_X_Y_sequenced_for_training
-from app.common.constants import FEATURE_CORRELATION, FEATURE_TARGET # and others
-from app.common.config import AppConfig # Assuming you have a config module for AppConfig
+from app.modeling.model_builders import LSTMModel
+
 logger = logging.getLogger("app.modeling.training_pipeline")
-
-
-# You need this function (create_X_Y_sequenced_for_training) defined or imported here
-def create_X_Y_sequenced_for_training(data_df, feature_cols, target_col, window_size):
-    X, Y = [], []
-    if len(data_df) < window_size + 1:
-        return np.array(X), np.array(Y)
-    for col in feature_cols:
-        if col not in data_df.columns:
-            logger.error(f"Sequencing: Feature column '{col}' not found. Cols: {data_df.columns.tolist()}")
-            return np.array([]), np.array([])
-    if target_col not in data_df.columns:
-        logger.error(f"Sequencing: Target column '{target_col}' not found. Cols: {data_df.columns.tolist()}")
-        return np.array([]), np.array([])
-    
-    # Ensure numeric types before accessing .values
-    for col in feature_cols: data_df[col] = pd.to_numeric(data_df[col], errors='coerce')
-    data_df[target_col] = pd.to_numeric(data_df[target_col], errors='coerce')
-    data_df.dropna(subset=feature_cols + [target_col], inplace=True) # Drop rows if conversion failed for any feature/target
-
-    if len(data_df) < window_size + 1: # Check again after dropna
-        logger.debug(f"Data length {len(data_df)} too short after coerce/dropna for window {window_size} + 1 target.")
-        return np.array(X), np.array(Y)
-
-    feature_data_np = data_df[feature_cols].values
-    target_data_np = data_df[target_col].values
-
-    for i in range(window_size, len(data_df)): # Target is for day i, features are i-window to i-1
-        sequence_x = feature_data_np[i-window_size:i, :]
-        X.append(sequence_x)
-        # Y value is the target for the *end* of the sequence.
-        # If target is return.shift(-1), target at index `i-1` is for the actual return of day `i`.
-        # So features up to `i-1` predict return of day `i`.
-        Y.append(target_data_np[i-1]) 
-    return np.array(X), np.array(Y)
-
 
 def train_model_pipeline(
     tickers_for_training: List[str],
-    index_ticker_symbol: Optional[str], # For fetching index data if strategy needs it
+    index_ticker_symbol: Optional[str],
     training_data_start_date_str: str,
     training_data_end_date_str: str,
     model_identifier_str: str,
     feature_engineer: FeatureEngineeringStrategy,
-    data_manager: DataManager, # Pass the DataManager instance
-    ohlcv_table_name: str, 
-    force_retrain: bool = False, # Changed to bool
-    model_artifacts_base_path: Optional[str] = None # Base path for saving models
-) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    data_manager: DataManager,
+    ohlcv_table_name: str,
+    force_retrain: bool = False,
+    model_artifacts_base_path: Optional[str] = None,
+    model: str = 'LSTM_Shuffle',
+    epochs: int = 50,
+    batch_size: int = 32,
+    prediction_horizon: int = 2
+) -> Optional[str]:
 
-    lstm_window_size = feature_engineer.config.get('lstm_window_size', 10)
-    
-    if not model_artifacts_base_path: # Get from AppConfig if not passed directly
-        model_artifacts_base_path = AppConfig.get('storage.model_artifact_path', 'data/models/')
-        # Ensure it's an absolute path if resolved from config
-        if model_artifacts_base_path is not None and not os.path.isabs(model_artifacts_base_path):
-            model_artifacts_base_path = os.path.join(AppConfig.get_project_root(), model_artifacts_base_path)
-    
     try:
-        if model_artifacts_base_path is not None:          
-            os.makedirs(model_artifacts_base_path, exist_ok=True)
-    except OSError as e_mkdir:
-        logger.error(f"Failed to create model artifacts directory '{model_artifacts_base_path}': {e_mkdir}")
-        return None, None, None
-    
-
-    
-    safe_artifacts_path = model_artifacts_base_path if model_artifacts_base_path is not None else ""
-
-    model_filename = os.path.join(safe_artifacts_path, f"{model_identifier_str}.keras")
-    x_scaler_filename = os.path.join(safe_artifacts_path, f"{model_identifier_str}_x_scaler.gz")
-    y_scaler_filename = os.path.join(safe_artifacts_path, f"{model_identifier_str}_y_scaler.gz")
-    
-    if not force_retrain and all(os.path.exists(f) for f in [model_filename, x_scaler_filename, y_scaler_filename]):
-        logger.info(f"Model files for '{model_identifier_str}' exist at {model_artifacts_base_path}. Skipping training.")
-        return model_filename, x_scaler_filename, y_scaler_filename
-
-    logger.info(f"--- Training Model '{model_identifier_str}' using Strategy: {feature_engineer.__class__.__name__} ---")
-    logger.info(f"Training Data Window: {training_data_start_date_str} to {training_data_end_date_str}")
-
-    # 1. Fetch raw stock data for training tickers
-    raw_stock_data_map = data_manager.get_data_from_db(
-        tickers_list=tickers_for_training,
-        start_date_str=training_data_start_date_str,
-        end_date_str=training_data_end_date_str,
-        table_name=ohlcv_table_name
-    )
-    if not raw_stock_data_map:
-        logger.error("No raw stock data obtained for training. Aborting.")
-        return None, None, None
-
-    # 2. Fetch raw index data IF strategy needs it
-    raw_index_df_for_transform = None
-    strategy_needs_index = FEATURE_CORRELATION in feature_engineer.get_feature_names() # Or a more direct method from strategy
-    if strategy_needs_index and index_ticker_symbol:
-        logger.info(f"Fetching index data ({index_ticker_symbol}) for training context.")
-        index_data_map = data_manager.get_data_from_db(
-            tickers_list=[index_ticker_symbol],
-            start_date_str=training_data_start_date_str,
-            end_date_str=training_data_end_date_str,
-            table_name=ohlcv_table_name
-        )
-        if index_data_map and index_ticker_symbol in index_data_map:
-            raw_index_df_for_transform = index_data_map[index_ticker_symbol]
-            if raw_index_df_for_transform.empty:
-                logging.warning(f"Fetched index data for {index_ticker_symbol} is empty for training period.")
-                raw_index_df_for_transform = None # Ensure it's None if empty
-        else:
-            logging.warning(f"Could not fetch or index data for {index_ticker_symbol} is empty for training.")
-    elif strategy_needs_index and not index_ticker_symbol:
-        logging.warning("Strategy indicates it needs index data, but no 'index_ticker_symbol' provided for training.")
-
-    # 3. Process each ticker's data using the feature engineer
-    processed_data_dict = {}
-    required_raw_cols_for_fe = feature_engineer.get_required_raw_columns()
-
-    for ticker_symbol, df_stock_raw_ticker in raw_stock_data_map.items():
-        if df_stock_raw_ticker.empty:
-            logging.warning(f"Empty raw data for ticker {ticker_symbol}. Skipping processing.")
-            continue
-        if not all(col in df_stock_raw_ticker.columns for col in required_raw_cols_for_fe):
-            missing_cols = [col for col in required_raw_cols_for_fe if col not in df_stock_raw_ticker.columns]
-            logging.warning(f"Ticker {ticker_symbol} raw data missing required columns {missing_cols} for strategy {feature_engineer.__class__.__name__}. Skipping.")
-            continue
+        if not model_artifacts_base_path:
+            raise ValueError("model_artifacts_base_path cannot be None")
         
-        transformed_df = feature_engineer.generate_features(
-            df_stock_raw=df_stock_raw_ticker.copy(),
-            df_index_raw=raw_index_df_for_transform.copy() if raw_index_df_for_transform is not None else None
-        )
+        model_dir = os.path.join(model_artifacts_base_path, model_identifier_str)
         
-        if not transformed_df.empty and len(transformed_df) >= lstm_window_size + 1:
-            processed_data_dict[ticker_symbol] = transformed_df
-        else:
-            actual_len = len(transformed_df) if not transformed_df.empty else 0
-            logging.warning(f"Ticker {ticker_symbol}: Not enough data after transform ({actual_len} rows, "
-                            f"need >= {lstm_window_size + 1}). Skipping.")
+        if Path(model_dir, "model.keras").exists() and not force_retrain:
+            logger.info(f"Model already exists at {model_dir}, skipping training.")
+            return model_dir
 
-    if not processed_data_dict:
-        logging.error("No data suitable for sequencing after processing all tickers. Aborting training.")
-        return None, None, None
+        logger.info(f"Preparing training data for tickers: {tickers_for_training}")
 
-    # 4. Prepare data for LSTM
-    all_X_list, all_Y_list = [], []
-    training_feature_cols = feature_engineer.get_feature_names()
-    target_col_name = feature_engineer.get_target_name()
+        # 1. Fetch all required data in one go
+        all_tickers_to_fetch = list(set(tickers_for_training + ([index_ticker_symbol] if index_ticker_symbol else [])))
+        historical_data = data_manager.get_data_from_db(
+            all_tickers_to_fetch,
+            training_data_start_date_str,
+            training_data_end_date_str,
+            ohlcv_table_name
+        )
+        index_df = historical_data.get(index_ticker_symbol)
 
-    if not training_feature_cols:
-        logging.error(f"Strategy {feature_engineer.__class__.__name__} did not define feature names. Aborting.")
-        return None, None, None
-    
-    logger.info(f"Model training with features: {training_feature_cols} and target: {target_col_name}")
-
-    for ticker_key, data_for_seq in processed_data_dict.items():
-        if not all(col in data_for_seq.columns for col in training_feature_cols) or \
-           target_col_name not in data_for_seq.columns:
-            missing_f = [c for c in training_feature_cols if c not in data_for_seq.columns]
-            missing_t = "None" if target_col_name in data_for_seq.columns else target_col_name
-            logging.warning(f"Transformed data for {ticker_key} missing columns. Features missing: {missing_f}, Target missing: {missing_t}. Available: {data_for_seq.columns.tolist()}. Skipping.")
-            continue
+        # 2. Generate features for each stock and collect them
+        all_feature_dfs = []
+        for ticker in tickers_for_training:
+            stock_df = historical_data.get(ticker)
+            if stock_df is None or stock_df.empty:
+                logger.warning(f"No data for training ticker {ticker}, skipping.")
+                continue
             
-        X_stock, Y_stock = create_X_Y_sequenced_for_training(
-            data_for_seq,
-            feature_cols=training_feature_cols,
-            target_col=target_col_name,
-            window_size=lstm_window_size
+            # Remove the 'ticker' column if it exists to prevent duplication
+            if 'ticker' in stock_df.columns:
+                stock_df = stock_df.drop(columns=['ticker'])
+            
+            feature_df = feature_engineer.generate_features(stock_df, df_index_raw=index_df, prediction_horizon=prediction_horizon)
+            # It's important to have the Ticker column for grouping later
+            feature_df['Ticker'] = ticker 
+            all_feature_dfs.append(feature_df)
+
+        if not all_feature_dfs:
+            logger.error("No feature data could be generated for any training tickers.")
+            return None
+
+  
+        combined_feature_df = pd.concat(all_feature_dfs)
+        logger.info(f"Combined feature DataFrame for training has shape: {combined_feature_df.shape}")
+  
+        logger.info(f"Shape after concatenation (no global de-duplication): {combined_feature_df.shape}")
+        feature_cols = feature_engineer.get_feature_names()
+        target_col = feature_engineer.get_target_name()
+        
+        cols_for_training = feature_cols + [target_col, 'Ticker']
+        
+        final_df_for_training = combined_feature_df.dropna(subset=cols_for_training).copy()
+
+        missing_cols = [c for c in cols_for_training if c not in combined_feature_df.columns]
+        if missing_cols:
+            logger.error(f"FATAL: The following required columns are missing from the combined DataFrame: {missing_cols}")
+            return None
+        print("###########################final_df_for_training########################")
+        print(final_df_for_training.head())
+        print(final_df_for_training.columns)
+
+        # Pass this clean DataFrame to the training function
+        success, saved_path = _perform_training_on_combined_df(
+            combined_df=final_df_for_training, # Pass the clean df
+            feature_engineer=feature_engineer,
+            model_save_path=model_dir,
+            model=model,
+            epochs=epochs,
+            batch_size=batch_size
         )
-        if X_stock.size > 0 and Y_stock.size > 0:
-            all_X_list.append(X_stock)
-            all_Y_list.append(Y_stock)
+        
+        if not success:
+            logger.error(f"Failed to train model '{model_identifier_str}'.")
+            return None
+
+        logger.info(f"Successfully trained and saved model '{model_identifier_str}' to '{saved_path}'")
+        return saved_path
+
+    except Exception as e:
+        logger.error(f"Error in train_model_pipeline: {e}", exc_info=True)
+        return None
+
+
+def _check_data_integrity(df, name="DataFrame"):
+    logger.debug(f"{name} - Shape: {df.shape}, Index unique: {df.index.is_unique}")
+    if df.index.has_duplicates:
+        duplicates = df.index[df.index.duplicated()].tolist()
+        logger.debug(f"{name} - Duplicate indices: {duplicates[:5]}...")  # Show first 5
+    return df.index.is_unique
+
+def _debug_dataframe_info(df, name="DataFrame"):
+    logger.debug(f"{name} - Shape: {df.shape}")
+    logger.debug(f"{name} - Columns: {df.columns.tolist()}")
+    logger.debug(f"{name} - Index type: {type(df.index)}")
+    logger.debug(f"{name} - First few rows:")
+    logger.debug(f"{df.head(3)}")
+
+def _create_scaled_sequences_from_group(group, feature_cols, target_col, window_size):
+    if len(group) < window_size + 1:
+        return [], []
+
+    logger.debug(f"Feature columns: {feature_cols}")
+    logger.debug(f"Target column: {target_col}")
+    logger.debug(f"Group columns: {group.columns.tolist()}")
+    logger.debug(f"Group shape: {group.shape}")
+
+
+    if group.index.has_duplicates:
+        logger.warning(f"Duplicate timestamps found in group. Shape before: {group.shape}")
+        # Keep the first occurrence of each duplicated timestamp
+        group = group.loc[~group.index.duplicated(keep='first')]
+        logger.warning(f"Shape after de-duplication: {group.shape}")
     
-    if not all_X_list:
-        logging.error("No sequences (X,Y) created from any stock. Aborting training.")
-        return None, None, None
-
-    # 5. Combine, Scale, and Train
-    X_combined = np.concatenate(all_X_list, axis=0)
-    Y_combined = np.concatenate(all_Y_list, axis=0).reshape(-1, 1)
-    logging.info(f"Shape of X_combined (unscaled): {X_combined.shape}, Y_combined: {Y_combined.shape}")
-
-    num_model_features = X_combined.shape[2]
-    if num_model_features != len(training_feature_cols):
-        logging.error(f"CRITICAL: Feature count mismatch. X_combined has {num_model_features} features, "
-                      f"strategy defined {len(training_feature_cols)} features ({training_feature_cols}). Aborting.")
-        return None, None, None
-
-    x_scaler = StandardScaler()
-    X_scaled_flat = x_scaler.fit_transform(X_combined.reshape(-1, num_model_features))
-    X_train_scaled = X_scaled_flat.reshape(X_combined.shape[0], lstm_window_size, num_model_features)
+    group = group.sort_index()
     
-    y_scaler = StandardScaler()
-    Y_train_scaled = y_scaler.fit_transform(Y_combined)
-
-    if X_train_scaled.shape[0] == 0: # Should be caught by previous checks ideally
-        logging.error("No training samples available after scaling. Aborting.")
-        return None, None, None
-
-    model_input_shape = (lstm_window_size, num_model_features)
-    model = create_lstm_model(input_shape_param=model_input_shape)
+    group = group.reset_index().set_index('timestamp')
     
+    if group.index.has_duplicates:
+        logger.error(f"CRITICAL: Still have duplicate timestamps in _create_scaled_sequences_from_group")
+        return [], []
+    
+    _check_data_integrity(group, "Group after cleaning")
+    # ======================================================================
 
-    epochs = feature_engineer.config.get('training_epochs', AppConfig.get('model_settings.default_training_epochs', 50))
-    batch_size = feature_engineer.config.get('training_batch_size', AppConfig.get('model_settings.default_batch_size', 32))
+    cols_for_expanding = feature_cols + [target_col]
+    
+    if target_col in feature_cols:
+        logger.error(f"Target column '{target_col}' is also in feature columns: {feature_cols}")
+        logger.error(f"This will cause conflicts. Please check the feature engineering strategy.")
+        return [], []
+    
+    clean_df = group[cols_for_expanding].copy()
+    
+    missing_cols = [col for col in cols_for_expanding if col not in group.columns]
+    if missing_cols:
+        logger.error(f"Missing columns in group: {missing_cols}")
+        logger.error(f"Available columns: {group.columns.tolist()}")
+        return [], []
+    
+    if clean_df.index.has_duplicates:
+        logger.error(f"CRITICAL: Clean DataFrame still has duplicate indices")
+        return [], []
+    
+    _check_data_integrity(clean_df, "Clean DataFrame")
+    _debug_dataframe_info(clean_df, "Clean DataFrame")
+    
+    logger.debug(f"Data types of clean_df: {clean_df.dtypes.to_dict()}")
+    logger.debug(f"Data types of feature_cols: {clean_df[feature_cols].dtypes.to_dict()}")
+    
+    target_data = clean_df[target_col]
+    if isinstance(target_data, pd.DataFrame):
+        logger.error(f"Target column '{target_col}' is returning a DataFrame with columns: {target_data.columns.tolist()}")
+        logger.error(f"This suggests there's a column name conflict. Available columns: {clean_df.columns.tolist()}")
+        return [], []
+    else:
+        logger.debug(f"Data type of target_col: {target_data.dtype}")
+    
+    expanding_mean = pd.DataFrame(index=clean_df.index)
+    expanding_std = pd.DataFrame(index=clean_df.index)
+    
+    for col in cols_for_expanding:
+        logger.debug(f"Processing column: {col}")
+        col_series = clean_df[col]
+        expanding_mean[col] = col_series.expanding(min_periods=window_size).mean()
+        expanding_std[col] = col_series.expanding(min_periods=window_size).std()
+        logger.debug(f"Column {col} - expanding_mean shape: {expanding_mean[col].shape}, expanding_std shape: {expanding_std[col].shape}")
+        logger.debug(f"Column {col} - expanding_mean type: {type(expanding_mean[col])}, expanding_std type: {type(expanding_std[col])}")
+    
+    _check_data_integrity(expanding_mean, "Expanding Mean")
+    _check_data_integrity(expanding_std, "Expanding Std")
+    _debug_dataframe_info(expanding_mean, "Expanding Mean")
+    _debug_dataframe_info(expanding_std, "Expanding Std")
 
-    model.fit(X_train_scaled, Y_train_scaled, epochs=epochs, batch_size=batch_size, verbose="auto", validation_split=0.1) # verbose=1 for training progress
+    scaled_group = pd.DataFrame(index=clean_df.index)
+    
+    for col in feature_cols:
+        try:
+            logger.debug(f"Scaling column: {col}")
+            logger.debug(f"clean_df[{col}] type: {type(clean_df[col])}, shape: {clean_df[col].shape}")
+            logger.debug(f"expanding_mean[{col}] type: {type(expanding_mean[col])}, shape: {expanding_mean[col].shape}")
+            logger.debug(f"expanding_std[{col}] type: {type(expanding_std[col])}, shape: {expanding_std[col].shape}")
+            
+            scaled_group[f"{col}_scaled"] = (clean_df[col] - expanding_mean[col]) / (expanding_std[col] + 1e-6)
+            logger.debug(f"Successfully scaled column: {col}")
+        except Exception as e:
+            logger.error(f"Error scaling column {col}: {e}")
+            logger.error(f"clean_df[{col}] shape: {clean_df[col].shape}")
+            logger.error(f"expanding_mean[{col}] shape: {expanding_mean[col].shape}")
+            logger.error(f"expanding_std[{col}] shape: {expanding_std[col].shape}")
+            return [], []
     
     try:
-        model.save(model_filename)
-        joblib.dump(x_scaler, x_scaler_filename)
-        joblib.dump(y_scaler, y_scaler_filename)
-        logging.info(f"Saved model & scalers for '{model_identifier_str}' to '{model_artifacts_base_path}'")
-    except Exception as e_save:
-        logging.error(f"Error saving model/scalers for {model_identifier_str}: {e_save}", exc_info=True)
-        return None, None, None
+        logger.debug(f"Scaling target column: {target_col}")
+        logger.debug(f"clean_df[{target_col}] type: {type(clean_df[target_col])}, shape: {clean_df[target_col].shape}")
+        logger.debug(f"expanding_mean[{target_col}] type: {type(expanding_mean[target_col])}, shape: {expanding_mean[target_col].shape}")
+        logger.debug(f"expanding_std[{target_col}] type: {type(expanding_std[target_col])}, shape: {expanding_std[target_col].shape}")
+        
+        scaled_group[f"{target_col}_scaled"] = (clean_df[target_col] - expanding_mean[target_col]) / (expanding_std[target_col] + 1e-6)
+        logger.debug(f"Successfully scaled target column: {target_col}")
+    except Exception as e:
+        logger.error(f"Error scaling target column {target_col}: {e}")
+        logger.error(f"clean_df[{target_col}] shape: {clean_df[target_col].shape}")
+        logger.error(f"expanding_mean[{target_col}] shape: {expanding_mean[target_col].shape}")
+        logger.error(f"expanding_std[{target_col}] shape: {expanding_std[target_col].shape}")
+        return [], []
+    
+    scaled_group.dropna(inplace=True)
+    if len(scaled_group) < window_size + 1:
+        return [], []
 
-    return model_filename, x_scaler_filename, y_scaler_filename
+    feature_data = scaled_group[[f"{c}_scaled" for c in feature_cols]].values
+    target_data = scaled_group[[f"{target_col}_scaled"]].values
+    
+    X_sequences, y_sequences = [], []
+    for i in range(len(feature_data) - window_size):
+        X_sequences.append(feature_data[i:(i + window_size)])
+        y_sequences.append(target_data[i + window_size])
+        
+    return X_sequences, y_sequences
+
+def _perform_training_on_combined_df(
+    combined_df: pd.DataFrame,
+    feature_engineer: FeatureEngineeringStrategy,
+    model_save_path: str,
+    model: str = 'LSTM_Shuffle',
+    epochs: int = 50,
+    batch_size: int = 32
+) -> Tuple[bool, Optional[str]]:
+    """
+    Internal helper with aggressive diagnostic cleaning to resolve the duplicate index error.
+    """
+    try:
+        feature_cols = feature_engineer.get_feature_names()
+        target_col = feature_engineer.get_target_name()
+        
+        # Get window size from feature engineer config, or use default
+        window_size = feature_engineer.config.get('lstm_window_size', 10)
+        
+        # If not in feature engineer config, try to get from model settings
+        if window_size == 10:  # This means it's the default
+            try:
+                from app.common.config import AppConfig
+                config = AppConfig.get_instance()
+                window_size = config.get('model_settings', {}).get('default_lstm_window_size', 10)
+                logger.info(f"Using window size from model settings: {window_size}")
+            except Exception as e:
+                logger.warning(f"Could not get window size from config, using default 10: {e}")
+        
+        logger.info(f"Using window size: {window_size}")
+        logger.info(f"Feature columns: {feature_cols}")
+        logger.info(f"Target column: {target_col}")
+        logger.info(f"Combined DataFrame columns: {combined_df.columns.tolist()}")
+        logger.info(f"Combined DataFrame shape: {combined_df.shape}")
+        logger.info(f"Combined DataFrame index unique: {combined_df.index.is_unique}")
+        
+        logger.info(f"Final feature columns: {feature_cols}")
+        logger.info(f"Final target column: {target_col}")
+        logger.info(f"Columns for expanding calculations: {feature_cols + [target_col]}")
+
+        
+        if combined_df.empty:
+            logger.error("Initial combined DataFrame is empty.")
+            return False, None
+
+        logger.info(f"Combined DataFrame columns: {combined_df.columns.tolist()}")
+        logger.info(f"Combined DataFrame shape: {combined_df.shape}")
+        logger.info(f"Combined DataFrame index unique: {combined_df.index.is_unique}")
+
+        if model in ['LSTM_Shuffle', 'LSTM_NoShuffle']:
+            
+            all_X, all_y_ticker = {}, {}
+            for ticker, group in combined_df.groupby('Ticker'):
+                
+         
+                initial_shape = group.shape
+                logger.debug(f"Processing ticker {ticker}, initial shape: {initial_shape}")
+                
+            
+                if 'ticker' in group.columns:
+                    group = group.drop(columns=['ticker'])
+                    logger.debug(f"Removed duplicate 'ticker' column for {ticker}")
+                
+                group = group.sort_index()
+                
+                if group.index.has_duplicates:
+                    logger.warning(f"DUPLICATE TIMESTAMPS DETECTED for ticker {ticker}. Shape before: {initial_shape}")
+                    # Keep the first occurrence of each duplicated timestamp
+                    group = group.loc[~group.index.duplicated(keep='first')]
+                    logger.warning(f"Shape after de-duplication for {ticker}: {group.shape}")
+                
+                # Step 4: CRITICAL - Reset the index to ensure no duplicate index issues
+                # This is the key fix - we reset the index to make sure pandas doesn't have any
+                # internal issues with the index
+                group = group.reset_index().set_index('timestamp')
+                
+                # Step 5: Final verification - check again for duplicates
+                if group.index.has_duplicates:
+                    logger.error(f"CRITICAL: Still have duplicate timestamps after de-duplication for {ticker}")
+                    # Force remove duplicates one more time
+                    group = group.loc[~group.index.duplicated(keep='first')]
+                    logger.warning(f"Final shape after forced de-duplication for {ticker}: {group.shape}")
+                
+                # Step 6: Debug logging
+                logger.debug(f"Final group for {ticker}: shape={group.shape}, index_unique={group.index.is_unique}")
+                
+                # Step 7: Additional debug - check for NaN values
+                nan_counts = group[feature_cols + [target_col]].isna().sum()
+                if nan_counts.sum() > 0:
+                    logger.warning(f"NaN values found in {ticker}: {nan_counts.to_dict()}")
+                
+                # Step 8: Check data types
+                logger.debug(f"Data types for {ticker}: {group[feature_cols + [target_col]].dtypes.to_dict()}")
+                # ==============================================================================
+
+                # Now, proceed with the cleaned group
+                X_sequences, y_sequences = _create_scaled_sequences_from_group(group, feature_cols, target_col, window_size)
+                
+                if X_sequences:
+                    all_X[ticker] = X_sequences
+                    all_y_ticker[ticker] = y_sequences
+                else:
+                    logger.warning(f"No sequences generated for ticker {ticker}")
+            
+            if not all_X:
+                logger.error("No sequences were generated for any ticker. Check data and window size.")
+                return False, None
+
+            # Now build the training set based on the model type
+            if model == 'LSTM_Shuffle':
+                logger.info("--- Training with Stateless LSTM (Shuffle) using expanding scaler ---")
+                
+                # Combine sequences from all tickers
+                X_list = [item for sublist in all_X.values() for item in sublist]
+                y_list = [item for sublist in all_y_ticker.values() for item in sublist]
+                
+                X_train, y_train = np.array(X_list), np.array(y_list)
+                indices = np.arange(X_train.shape[0])
+                np.random.shuffle(indices)
+                X_train, y_train = X_train[indices], y_train[indices]
+                
+                lstm_model = LSTMModel(input_shape=(window_size, len(feature_cols)))
+                lstm_model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, verbose=0)
+                lstm_model.save(model_save_path)
+                return True, model_save_path
+
+            elif model == 'LSTM_NoShuffle':
+                logger.info("--- Training with Stateful LSTM (NoShuffle) using expanding scaler ---")
+                
+                batch_input_shape = (batch_size, window_size, len(feature_cols))
+                lstm_model = LSTMModel(batch_input_shape=batch_input_shape, stateful=True)
+                tickers = list(all_X.keys())
+
+                for epoch in range(epochs):
+                    np.random.shuffle(tickers)
+                    for ticker in tickers:
+                        X_train_stock = np.array(all_X[ticker])
+                        y_train_stock = np.array(all_y_ticker[ticker])
+                        
+                        n_samples = len(X_train_stock)
+                        trimmed_len = (n_samples // batch_size) * batch_size
+                        if trimmed_len == 0: continue
+                        
+                        X_train_stock = X_train_stock[:trimmed_len]
+                        y_train_stock = y_train_stock[:trimmed_len]
+
+                        lstm_model.fit(
+                            X_train_stock, y_train_stock, epochs=1,
+                            batch_size=batch_size, verbose=0, shuffle=False
+                        )
+                        lstm_model.reset_states()
+                
+                lstm_model.save(model_save_path)
+                return True, model_save_path
+        
+        else:
+            logger.error(f"Unknown model training type specified: '{model}'")
+            return False, None
+
+    except Exception as e:
+        logger.error(f"Error during model training execution: {e}", exc_info=True)
+        return False, None

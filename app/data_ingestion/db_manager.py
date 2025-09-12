@@ -510,6 +510,20 @@ class DataManager:
                         df_for_ticker = full_df_from_db[full_df_from_db['ticker'] == ticker_symbol_db].copy() if not full_df_from_db.empty else pd.DataFrame()
                         
                         if not df_for_ticker.empty:
+                            # ======================================================================
+                            # THE FIX: Ensure unique timestamps before setting as index
+                            # ======================================================================
+                            # Check for duplicate timestamps and handle them
+                            if df_for_ticker['timestamp'].duplicated().any():
+                                logging.warning(f"Duplicate timestamps found for {ticker_symbol_db}. Shape before: {df_for_ticker.shape}")
+                                # Keep the first occurrence of each duplicated timestamp
+                                df_for_ticker = df_for_ticker.drop_duplicates(subset=['timestamp'], keep='first')
+                                logging.warning(f"Shape after de-duplication for {ticker_symbol_db}: {df_for_ticker.shape}")
+                            
+                            # Sort by timestamp to ensure proper order
+                            df_for_ticker = df_for_ticker.sort_values('timestamp')
+                            # ======================================================================
+                            
                             df_for_ticker.set_index('timestamp', inplace=True)
                             for col in ['open', 'high', 'low', 'close', 'volume', 'vwap']:
                                 if col in df_for_ticker.columns:

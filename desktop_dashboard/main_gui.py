@@ -5,78 +5,68 @@ import json
 import logging
 import pandas as pd
 import time 
-import datetime
+from datetime import date, datetime, timedelta
 from typing import Optional, Dict, Any, List 
 import numpy as np 
 import subprocess
-
+from pathlib import Path
+import stat
+from PIL import Image, ImageTk
+from metrics_widgets import MetricsDisplayWidget
+from plot_widgets import ResultsPlotWidget, TreemapWidget
+import re
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QComboBox, QPushButton, QLabel, QTableWidget, QTableWidgetItem,
     QTextEdit, QProgressBar, QScrollArea, QSplitter, QGroupBox,
-    QGridLayout, QLayout, QLineEdit, QMessageBox
+    QGridLayout, QLayout, QLineEdit, QMessageBox, QDateEdit, QSizePolicy,QCheckBox, QFileDialog, QStackedWidget
 )
-from PyQt6.QtGui import QPixmap, QFont
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal # QTimer only for post-run refresh
-
-# Assuming data_loader.py is in the same directory and defines PROJECT_ROOT
-from data_loader import get_list_of_backtest_runs, load_run_data, PROJECT_ROOT
-# STATUS_DIR and LOGS_DIR are not directly used by main_gui anymore if not polling files
-
-import matplotlib.pyplot as plt
-
-# --- Setup Logger for GUI ---
-if not logging.getLogger("desktop_dashboard").handlers:
-    gui_logger_instance = logging.getLogger("desktop_dashboard")
-    gui_logger_instance.setLevel(logging.INFO) # INFO for GUI, DEBUG for subprocess is fine
-    stream_handler = logging.StreamHandler(sys.stdout)
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - [%(name)s:%(filename)s:%(lineno)d] - %(message)s')
-    stream_handler.setFormatter(formatter)
-    gui_logger_instance.addHandler(stream_handler)
-    gui_logger_instance.propagate = False
-logger = logging.getLogger("desktop_dashboard.main_gui")
-
-STATUS_UPDATE_PREFIX = "GUI_STATUS_UPDATE::" # Must match run_system.py
-
-
-# trading_platform/desktop_dashboard/main_gui.py
-import sys
-import os
-import json
-import logging
-import pandas as pd
-import time 
-import datetime
-from typing import Optional, Dict, Any, List
-import numpy as np
-import subprocess
-
-from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QComboBox, QPushButton, QLabel, QTableWidget, QTableWidgetItem,
-    QTextEdit, QProgressBar, QScrollArea, QSplitter, QGroupBox,
-    QGridLayout, QLayout, QLineEdit, QMessageBox, QHeaderView
-)
-from PyQt6.QtGui import QPixmap, QFont
+from PyQt6.QtGui import QPixmap, QFont, QColor, QPen, QBrush
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
+from data_loader import RAW_PREDICTIONS_DIR
+from desktop_dashboard.data_loader import get_list_of_backtest_runs, load_run_data
+from desktop_dashboard.data_loader import get_list_of_backtest_runs
+from data_loader import get_raw_predictions_filepath
+from app.common.constants import get_all_portfolio_strategies, get_feature_engineering_strategies, get_predictive_strategies
 
-# Assuming data_loader.py is in the same directory and defines PROJECT_ROOT
-from data_loader import get_list_of_backtest_runs, load_run_data, PROJECT_ROOT
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-import matplotlib.pyplot as plt # For _create_scatter_plot_image
-
-# Setup basic logging for the GUI
-if not logging.getLogger("desktop_dashboard").handlers:
-    gui_logger_instance = logging.getLogger("desktop_dashboard")
-    gui_logger_instance.setLevel(logging.DEBUG)
-    stream_handler = logging.StreamHandler(sys.stdout)
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - [%(name)s:%(filename)s:%(lineno)d] - %(message)s')
-    stream_handler.setFormatter(formatter)
-    gui_logger_instance.addHandler(stream_handler)
-    gui_logger_instance.propagate = False
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("desktop_dashboard.main_gui")
+STATUS_UPDATE_PREFIX = "GUI_STATUS_UPDATE::"
 
-STATUS_UPDATE_PREFIX = "GUI_STATUS_UPDATE::" # Must match run_system.py
+DATA_DIR = Path(PROJECT_ROOT) / "data"
+PLOTS_DIR = DATA_DIR / "plots"
+STATUS_UPDATE_PREFIX = "GUI_STATUS_UPDATE::"
+
+def convert_host_path_to_container(host_path: Path, project_root: Path) -> str:
+    relative_path = host_path.relative_to(project_root)
+    container_path = Path("/opt/app") / relative_path
+    return container_path.as_posix()
+
+def ensure_directory_permissions(directory: Path) -> bool:
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        os.chmod(directory, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to set permissions for directory {directory}: {e}")
+        return False
+
+for dir_path in [DATA_DIR, PLOTS_DIR]:
+    if ensure_directory_permissions(dir_path):
+        logger.info(f"Ensured directory exists with proper permissions: {dir_path}")
+    else:
+        logger.warning(f"Could not ensure proper permissions for directory: {dir_path}")
+
+def _convert_container_path_to_host(container_path: str) -> Path:
+    if not container_path:
+        return Path()
+    if container_path.startswith('/opt/app/'):
+        container_path = container_path[9:]
+    return Path(PROJECT_ROOT) / container_path
 
 class BacktestRunnerThread(QThread):
     log_message = pyqtSignal(str)
@@ -91,9 +81,8 @@ class BacktestRunnerThread(QThread):
 
     def run(self):
         try:
-            self.log_message.emit(f"GUI_LOG: Starting backtest via Docker Compose...") # GUI internal log
+            self.log_message.emit(f"GUI_LOG: Starting backtest via Docker Compose...")
             self.log_message.emit(f"GUI_LOG: Executing: {' '.join(self.command_list)}")
-            
             self.process = subprocess.Popen(
                 self.command_list,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -102,31 +91,28 @@ class BacktestRunnerThread(QThread):
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             )
             pid_msg = f"GUI_LOG: Subprocess started (PID: {self.process.pid if self.process else 'N/A'}). Monitoring output..."
-            self.log_message.emit(pid_msg); logger.info(pid_msg)
-
+            self.log_message.emit(pid_msg)
+            logger.info(pid_msg)
             if self.process and self.process.stdout:
                 for line in iter(self.process.stdout.readline, ''):
                     if self.isInterruptionRequested():
                         self.log_message.emit("GUI_LOG: Backtest process interruption requested.")
                         break
-                    self.log_message.emit(line.strip()) # Emit each line from subprocess
-            
-            exit_code = -1 # Default if issues before process.wait()
+                    self.log_message.emit(line.strip())
+            exit_code = -1
             if self.process:
                 if not self.isInterruptionRequested() and self.process.stdout is not None:
-                    # Ensure process has a chance to finish writing before getting returncode
-                    self.process.stdout.close() # Close stdout to help Popen.wait() if process writes a lot
-                    self.process.wait() 
+                    self.process.stdout.close()
+                    self.process.wait()
                     exit_code = self.process.returncode
                     self.log_message.emit(f"GUI_LOG: Backtest subprocess finished with exit code: {exit_code}")
                 else:
                     self.log_message.emit("GUI_LOG: Backtest subprocess was interrupted by GUI signal.")
-                    exit_code = -2 # Custom code for GUI interruption
+                    exit_code = -2
             else:
                 self.log_message.emit("GUI_ERROR: Subprocess Popen object is None, likely failed to start.")
-                exit_code = -102 
+                exit_code = -102
             self.process_finished.emit(exit_code)
-
         except FileNotFoundError:
             self.log_message.emit(f"GUI_ERROR: Command '{self.command_list[0]}' not found. Is Docker Compose in PATH?")
             self.process_finished.emit(-100)
@@ -134,578 +120,1034 @@ class BacktestRunnerThread(QThread):
             self.log_message.emit(f"GUI_ERROR: Exception running backtest subprocess: {e}")
             logger.error(f"Exception in BacktestRunnerThread: {e}", exc_info=True)
             self.process_finished.emit(-101)
-        # finally: # stdout is closed in the try block now
 
-    def stop_process(self): # Unchanged, looks good
+    def stop_process(self):
         self.requestInterruption()
         if self.process and self.process.poll() is None:
-            self.log_message.emit("GUI_LOG: Attempting to stop backtest subprocess..."); self.process.terminate()
+            self.log_message.emit("GUI_LOG: Attempting to stop backtest process tree...")
             try:
-                self.process.wait(timeout=3); self.log_message.emit("GUI_LOG: Subprocess terminated.")
-            except subprocess.TimeoutExpired:
-                self.log_message.emit("GUI_LOG: Subprocess kill timeout."); self.process.kill(); self.process.wait()
-                self.log_message.emit("GUI_LOG: Subprocess killed.")
-
+                if os.name == 'nt':
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(self.process.pid)],
+                        check=True,
+                        capture_output=True
+                    )
+                    self.log_message.emit("GUI_LOG: taskkill command sent.")
+                else:
+                    os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+                    self.log_message.emit("GUI_LOG: SIGTERM sent to process group.")
+                self.process.wait(timeout=5)
+                self.log_message.emit("GUI_LOG: Subprocess terminated successfully.")
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, PermissionError, ProcessLookupError) as e:
+                self.log_message.emit(f"GUI_WARN: Graceful terminate failed ({e}), attempting final kill.")
+                try:
+                    self.process.kill()
+                    self.process.wait()
+                    self.log_message.emit("GUI_LOG: Subprocess killed.")
+                except Exception as kill_e:
+                    self.log_message.emit(f"GUI_ERROR: Final kill attempt also failed: {kill_e}")
 
 class BacktestDashboard(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Trading System - Backtest Dashboard"); self.setGeometry(50, 50, 1600, 1000)
-        self.current_run_data: Optional[Dict[str, Any]] = None
+        self.setWindowTitle("Trading System - Backtest Dashboard")
+        self.showMaximized
+        self.current_run_id: Optional[str] = None
+        self.run_data: Optional[Dict] = None
+        self.merged_eval_df: Optional[pd.DataFrame] = None
+        self.equity_curve_df: Optional[pd.DataFrame] = None
         self.backtest_thread: Optional[BacktestRunnerThread] = None
-        
-        self.active_run_gui_start_time_monotonic: Optional[float] = None # When GUI clicked "Start"
-        self.active_run_process_start_time_monotonic: Optional[float] = None # From status: overall_start_time_unix
-        self.active_run_total_iterations: Optional[int] = None
         self.active_run_id_from_status: Optional[str] = None
-
-        # UI Elements (initialized here)
-        self.run_selector = QComboBox(); self.refresh_runs_button = QPushButton("Refresh Runs List")
-        self.status_label = QLabel(); self.progress_bar = QProgressBar(); self.eta_label = QLabel(); self.elapsed_time_label = QLabel()
-        self.log_view_area = QTextEdit()
-        self.new_run_base_config_input = QLineEdit("app_config.yaml"); self.new_run_profile_config_input = QLineEdit()
-        self.new_run_scope_selector = QComboBox(); self.new_run_scope_selector.addItems(["single_stock_model", "all_stocks_model"])
-        self.new_run_strategy_selector = QComboBox()
-        self.new_run_tickers_input = QLineEdit("AAPL"); self.new_run_training_start_input = QLineEdit(datetime.date.today().replace(year=datetime.date.today().year-1).strftime('%Y-%m-%d'))
-        self.new_run_bt_start_input = QLineEdit((datetime.date.today() - datetime.timedelta(days=14)).strftime('%Y-%m-%d')) # Adjusted default
-        self.new_run_bt_end_input = QLineEdit((datetime.date.today() - datetime.timedelta(days=7)).strftime('%Y-%m-%d')) # Adjusted default
-        self.new_run_horizon_input = QLineEdit("2")
-        self.new_run_force_retrain_checkbox = QPushButton("Force Retrain Initial"); self.new_run_force_retrain_checkbox.setCheckable(True); self.new_run_force_retrain_checkbox.setChecked(True)
-        self.new_run_force_retrain_steps_checkbox = QPushButton("Force Retrain Steps"); self.new_run_force_retrain_steps_checkbox.setCheckable(True)
-        self.run_backtest_button = QPushButton("Start New Dockerized Backtest")
-        self.metrics_layout = QVBoxLayout(); self.plot_ticker_selector = QComboBox()
-        self.plots_display_layout = QVBoxLayout(); self.plots_scroll_area = QScrollArea()
-
+        self.active_run_gui_start_time_monotonic: Optional[float] = None
+        self.eta_countdown_timer = QTimer(self)
+        self.eta_seconds_remaining = 0
+        self._init_controls()
         self._init_ui_layout()
         self._connect_signals()
-        self._populate_new_run_strategy_selector()
-        self.populate_run_selector() 
-        self._reset_live_monitor_ui()
+        QTimer.singleShot(0, self.initial_load)
 
-    def _init_ui_layout(self): # This method arranges pre-initialized widgets
-        # ... (Your _init_ui_layout seems fine, ensure all self.widgets are added to layouts) ...
-        # Example for Progress GroupBox, ensure all widgets are 'self.'
-        main_widget = QWidget(); self.setCentralWidget(main_widget); main_layout = QVBoxLayout(main_widget)
-        select_run_gb = QGroupBox("View Completed Backtest Results"); select_run_lay = QHBoxLayout(select_run_gb)
-        select_run_lay.addWidget(QLabel("Select Run:")); select_run_lay.addWidget(self.run_selector, 1); select_run_lay.addWidget(self.refresh_runs_button)
-        main_layout.addWidget(select_run_gb)
-        new_run_gb = QGroupBox("Execute New Backtest (via Docker Compose)"); new_run_grid = QGridLayout(new_run_gb)
-        new_run_grid.addWidget(QLabel("Base Cfg:"),0,0); new_run_grid.addWidget(self.new_run_base_config_input,0,1)
-        new_run_grid.addWidget(QLabel("Profile Cfg (opt):"),0,2); new_run_grid.addWidget(self.new_run_profile_config_input,0,3)
-        new_run_grid.addWidget(QLabel("Scope:"),1,0); new_run_grid.addWidget(self.new_run_scope_selector,1,1)
-        new_run_grid.addWidget(QLabel("Strategy:"),1,2); new_run_grid.addWidget(self.new_run_strategy_selector,1,3)
-        new_run_grid.addWidget(QLabel("Tickers (CSV):"),2,0); new_run_grid.addWidget(self.new_run_tickers_input,2,1)
-        new_run_grid.addWidget(QLabel("Train Start Date:"),2,2); new_run_grid.addWidget(self.new_run_training_start_input,2,3)
-        new_run_grid.addWidget(QLabel("BT Start:"),3,0); new_run_grid.addWidget(self.new_run_bt_start_input,3,1)
-        new_run_grid.addWidget(QLabel("BT End:"),3,2); new_run_grid.addWidget(self.new_run_bt_end_input,3,3)
-        new_run_grid.addWidget(QLabel("Horizon (d):"),4,0); new_run_grid.addWidget(self.new_run_horizon_input,4,1)
-        new_run_grid.addWidget(self.new_run_force_retrain_checkbox, 4,2)
-        new_run_grid.addWidget(self.new_run_force_retrain_steps_checkbox, 4,3)
-        new_run_grid.addWidget(self.run_backtest_button,5,0,1,4)
-        main_layout.addWidget(new_run_gb)
+    def _init_controls(self):
+        plot_min_height = 450
+
+        self.new_run_base_config_input = QLineEdit("app_config.yaml")
+        self.new_run_profile_config_input = QLineEdit()
+        self.new_run_scope_selector = QComboBox()
+        self.new_run_scope_selector.addItems(["all_stocks_model", "single_stock_model"])
+        self.feature_engineering_strategy_selector = QComboBox()
+        self.feature_strategy_label = QLabel("Feature Strategia:")
+        self.new_run_tickers_input = QLineEdit("AAPL GOOGL TSLA NVDA AMZN SPY")
+        today = date.today()
+        self.new_run_training_start_input = QLineEdit((today - timedelta(days=365*2)).strftime('%d-%m-%Y'))
+        self.new_run_bt_start_input = QLineEdit((today - timedelta(days=180)).strftime('%d-%m-%Y'))
+        self.new_run_bt_end_input = QLineEdit(today.strftime('%d-%m-%Y'))
+        self.new_run_horizon_input = QLineEdit("2")
+        self.rebalance_days_input = QLineEdit("2")
+        self.portfolio_strategy_selector = QComboBox()
+        self.top_k_input = QLineEdit("25")
+        self.allow_shorting_checkbox = QCheckBox("Krótka sprzedaż")
+        self.fully_invested_checkbox = QCheckBox("Gotówka")
+        self.fully_invested_checkbox.setChecked(True)
+        self.max_position_size_input = QLineEdit("0.10")
+        self.max_position_size_input.setPlaceholderText(" 0.10 = 10%")
+        self.min_position_size_input = QLineEdit("0.01")
+        self.min_position_size_input.setPlaceholderText(" 0.01 = 1%")
+        self.load_model_selector = QComboBox()
+        self.load_model_selector.setPlaceholderText("Nowy model")
+
+        self.load_predictions_selector = QComboBox(); self.load_predictions_selector.setPlaceholderText("Zestaw z prognozą")
+
+        self.model = QComboBox()
+        self.model.addItems(["LSTM_Shuffle", "LSTM_NoShuffle"])
+        self.save_model_as_input = QLineEdit()
+        self.save_model_as_input.setPlaceholderText("Custom Tag")
+        self.new_run_force_retrain_checkbox = QCheckBox("Initial trening"); self.new_run_force_retrain_checkbox.setChecked(True)
+        self.new_run_force_retrain_steps_checkbox = QCheckBox("Retrain Every Step")
+        self.retrain_frequency_input = QLineEdit(); self.retrain_frequency_input.setPlaceholderText("Odstęp pomiędzy treningami: 5")
+        self.epochs_input = QLineEdit("50")
+        self.batch_size_input = QLineEdit("64")
+        self.run_backtest_button = QPushButton("Nowy Backtest")
+        self.stop_backtest_button = QPushButton("Stop Backtest"); self.stop_backtest_button.setEnabled(False)
+        self.stop_backtest_button.setStyleSheet("background-color: #ff6b6b; color: white;")
+        self.refresh_button = QPushButton("Odśwież")
+        self.save_results_button = QPushButton("Zapisz Raport"); self.save_results_button.setEnabled(False)
+        self.status_label = QLabel("Status: Idle.")
+        self.progress_bar = QProgressBar()
+        self.eta_label = QLabel("ETA: N/A")
+        self.elapsed_time_label = QLabel("Upłynęło: N/A")
+        self.log_view_area = QTextEdit(); self.log_view_area.setReadOnly(True)
+        self.run_selector = QComboBox()
+        self.ticker_selector = QComboBox()
+        self.metrics_display = MetricsDisplayWidget("Metryki")
+        
+        self.equity_plot = ResultsPlotWidget(initial_title= "Krzywa Kapitału Portfela", parent= self)
+        self.equity_plot.setMinimumHeight(plot_min_height)
+
+        self.holdings_plot = ResultsPlotWidget(initial_title="Portfolio Holdings", parent=self)
+        self.holdings_plot.setMinimumHeight(plot_min_height)
+
+        self.timeseries_plot = ResultsPlotWidget(initial_title="Prognoza vs. Rzeczywistość",parent=self)
+        self.timeseries_plot.setMinimumHeight(plot_min_height)
+
+        self.scatter_plot = ResultsPlotWidget(initial_title="Analiza Reszt vs. Prognoza", parent= self)
+        self.scatter_plot.setMinimumHeight(plot_min_height)
+
+        self.residuals_plot = ResultsPlotWidget(initial_title="Analiza Reszt", parent= self)
+        self.residuals_plot.setMinimumHeight(plot_min_height)
+
+        self.residuals_time = ResultsPlotWidget(initial_title="Analiza Reszt w Czasie", parent=self)
+        self.residuals_time.setMinimumHeight(plot_min_height)
+
+        self.lookback_period_input = QLineEdit("252")
+        self.lookback_period_input.setPlaceholderText("252 = 1 rok")
+
+        self.entry_threshold_input = QLineEdit("0.005")
+        self.entry_threshold_input.setPlaceholderText("0.005 = 0.5%")
+        self.market_ticker_input = QLineEdit("SPY")
+        self.market_ticker_input.setPlaceholderText("SPY")
+        
+        self.stop_loss_pct_input = QLineEdit("0.05")
+        self.stop_loss_pct_input.setPlaceholderText("e.g., 0.05 for 5%")
+        self.take_profit_pct_input = QLineEdit("0.15")
+        self.take_profit_pct_input.setPlaceholderText("e.g., 0.15 for 15%")
+        self.trailing_stop_pct_input = QLineEdit("0.03")
+        self.trailing_stop_pct_input.setPlaceholderText("e.g., 0.03 for 3%")
+        self.enable_stop_loss_checkbox = QCheckBox("Stop-Loss/Take-Profit")
+        self.enable_stop_loss_checkbox.setChecked(True)
+        self.use_trailing_stop_checkbox = QCheckBox("Trailing Stop")
+        self.use_trailing_stop_checkbox.setChecked(True)
+        
+
+
+
+    def _init_ui_layout(self):
+        
+        main_container = QWidget()
+        main_layout = QVBoxLayout(main_container)
+        scroll_area = QScrollArea(); scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(main_container)
+        self.setCentralWidget(scroll_area)
+        
+        top_bottom_splitter = QSplitter(Qt.Orientation.Vertical)
+        main_layout.addWidget(top_bottom_splitter)
+
+        top_widget = QWidget()
+        top_layout = QVBoxLayout(top_widget)
+        top_bottom_splitter.addWidget(top_widget)
+        
+        new_run_gb = QGroupBox("Nowy Backtest")
+        new_run_grid = QGridLayout(new_run_gb)
+        new_run_grid.addWidget(QLabel("<b> Configuracja </b>"), 0, 0, 1, 4)
+        new_run_grid.addWidget(QLabel("Base Cfg:"), 1, 0); new_run_grid.addWidget(self.new_run_base_config_input, 1, 1)
+        new_run_grid.addWidget(QLabel("Profile Cfg:"), 1, 2); new_run_grid.addWidget(self.new_run_profile_config_input, 1, 3)
+        new_run_grid.addWidget(QLabel("Model Scope:"), 2, 0); new_run_grid.addWidget(self.new_run_scope_selector, 2, 1)
+        new_run_grid.addWidget(self.feature_strategy_label, 2, 2); new_run_grid.addWidget(self.feature_engineering_strategy_selector, 2, 3)
+        new_run_grid.addWidget(QLabel("<b>Data</b>"), 3, 0, 1, 4)
+        new_run_grid.addWidget(QLabel("Tickers:"), 4, 0); new_run_grid.addWidget(self.new_run_tickers_input, 4, 1, 1, 3)
+        new_run_grid.addWidget(QLabel("Train Start:"), 5, 0); new_run_grid.addWidget(self.new_run_training_start_input, 5, 1)
+        new_run_grid.addWidget(QLabel("Backtest Start:"), 5, 2); new_run_grid.addWidget(self.new_run_bt_start_input, 5, 3)
+        new_run_grid.addWidget(QLabel("Backtest End:"), 6, 0); new_run_grid.addWidget(self.new_run_bt_end_input, 6, 1)
+        new_run_grid.addWidget(QLabel("Prediction Horizon:"), 6, 2); new_run_grid.addWidget(self.new_run_horizon_input, 6, 3)
+        new_run_grid.addWidget(QLabel("<b>Portfolio & Model Settings</b>"), 7, 0, 1, 4)
+        new_run_grid.addWidget(QLabel("Portfolio Strategy:"), 8, 0); new_run_grid.addWidget(self.portfolio_strategy_selector, 8, 1)
+        new_run_grid.addWidget(QLabel("Top K:"), 8, 2); new_run_grid.addWidget(self.top_k_input, 8, 3)
+        new_run_grid.addWidget(self.allow_shorting_checkbox, 8, 4)
+        new_run_grid.addWidget(self.fully_invested_checkbox, 9, 4)
+        
+        new_run_grid.addWidget(QLabel("Max Position Size:"), 9, 0); new_run_grid.addWidget(self.max_position_size_input, 9, 1)
+        new_run_grid.addWidget(QLabel("Min Position Size:"), 10, 0); new_run_grid.addWidget(self.min_position_size_input, 10, 1)
+        new_run_grid.addWidget(QLabel("Rebalance (Days):"), 10, 2); new_run_grid.addWidget(self.rebalance_days_input, 10, 3)
+        new_run_grid.addWidget(QLabel("Lookback Period:"), 11, 0); new_run_grid.addWidget(self.lookback_period_input, 11, 1)
+        new_run_grid.addWidget(QLabel("Entry Threshold:"), 11, 2); new_run_grid.addWidget(self.entry_threshold_input, 11, 3)
+        new_run_grid.addWidget(QLabel("Market Ticker:"), 12, 2); new_run_grid.addWidget(self.market_ticker_input, 12, 3)
+        
+        new_run_grid.addWidget(QLabel("<b>Risk Management</b>"), 13, 0, 1, 4)
+        new_run_grid.addWidget(QLabel("Enable Stop Loss:"), 14, 0); new_run_grid.addWidget(self.enable_stop_loss_checkbox, 14, 1)
+        new_run_grid.addWidget(QLabel("Stop Loss %:"), 14, 2); new_run_grid.addWidget(self.stop_loss_pct_input, 14, 3)
+        new_run_grid.addWidget(QLabel("Take Profit %:"), 15, 0); new_run_grid.addWidget(self.take_profit_pct_input, 15, 1)
+        new_run_grid.addWidget(QLabel("Trailing Stop %:"), 15, 2); new_run_grid.addWidget(self.trailing_stop_pct_input, 15, 3)
+        new_run_grid.addWidget(QLabel("Use Trailing Stop:"), 16, 0); new_run_grid.addWidget(self.use_trailing_stop_checkbox, 16, 1)
+        
+        new_run_grid.addWidget(QLabel("Model Type:"), 19, 2); new_run_grid.addWidget(self.model, 19, 3)
+        new_run_grid.addWidget(QLabel("<b>Model Training</b>"), 20, 0, 1, 4)
+        new_run_grid.addWidget(QLabel("Load Pre-Trained Model:"), 21, 0); new_run_grid.addWidget(self.load_model_selector, 21, 1, 1, 2)
+        new_run_grid.addWidget(QLabel("Load Old Predictions:"), 20, 2); new_run_grid.addWidget(self.load_predictions_selector, 20, 3)
+
+        new_run_grid.addWidget(self.refresh_button, 21, 3)
+        new_run_grid.addWidget(QLabel("Epochs:"), 22, 0); new_run_grid.addWidget(self.epochs_input, 22, 1)
+        new_run_grid.addWidget(QLabel("Batch Size:"), 22, 2); new_run_grid.addWidget(self.batch_size_input, 22, 3)
+        new_run_grid.addWidget(self.new_run_force_retrain_checkbox, 23, 0); new_run_grid.addWidget(self.new_run_force_retrain_steps_checkbox, 23, 1)
+        new_run_grid.addWidget(QLabel("Retrain Freq (Days):"), 23, 2); new_run_grid.addWidget(self.retrain_frequency_input, 23, 3)
+        new_run_grid.addWidget(QLabel("Custom Name Tag:"), 24, 0); new_run_grid.addWidget(self.save_model_as_input, 24, 1, 1, 3)
+        new_run_grid.addWidget(self.run_backtest_button, 25, 0, 1, 2); new_run_grid.addWidget(self.stop_backtest_button, 25, 2, 1, 2)
+        top_layout.addWidget(new_run_gb)
+        
         progress_gb = QGroupBox("Live Backtest Monitor"); progress_grid = QGridLayout(progress_gb)
+
         self.progress_bar.setRange(0,100); self.progress_bar.setValue(0); self.progress_bar.setTextVisible(True); self.progress_bar.setFormat("0%")
-        self.log_view_area.setReadOnly(True); self.log_view_area.setMinimumHeight(200); self.log_view_area.setFont(QFont("Courier", 8))
+        self.log_view_area.setReadOnly(True); self.log_view_area.setMinimumHeight(250); self.log_view_area.setFont(QFont("Courier", 8))
         progress_grid.addWidget(QLabel("Status:"),0,0); progress_grid.addWidget(self.status_label,0,1,1,3)
         progress_grid.addWidget(QLabel("Progress:"),1,0); progress_grid.addWidget(self.progress_bar,1,1)
         progress_grid.addWidget(QLabel("ETA:"),1,2); progress_grid.addWidget(self.eta_label,1,3)
         progress_grid.addWidget(QLabel("Elapsed:"),2,0); progress_grid.addWidget(self.elapsed_time_label,2,1)
         progress_grid.addWidget(QLabel("Process Output Log:"),3,0); progress_grid.addWidget(self.log_view_area,4,0,1,4)
-        main_layout.addWidget(progress_gb)
-        results_splitter = QSplitter(Qt.Orientation.Horizontal)
-        metrics_scroll = QScrollArea(); metrics_scroll.setWidgetResizable(True)
-        metrics_content = QWidget(); metrics_content.setLayout(self.metrics_layout)
-        metrics_scroll.setWidget(metrics_content); results_splitter.addWidget(metrics_scroll)
-        plots_main_w = QWidget(); plots_main_l = QVBoxLayout(plots_main_w)
-        plot_ticker_ctrl_w = QWidget(); plot_ticker_sel_l = QHBoxLayout(plot_ticker_ctrl_w)
-        plot_ticker_sel_l.addWidget(QLabel("View Plots for Ticker:")); plot_ticker_sel_l.addWidget(self.plot_ticker_selector,1)
-        plots_main_l.addWidget(plot_ticker_ctrl_w)
-        self.plots_scroll_area.setWidgetResizable(True)
-        plots_display_content_w = QWidget(); plots_display_content_w.setLayout(self.plots_display_layout)
-        self.plots_scroll_area.setWidget(plots_display_content_w); plots_main_l.addWidget(self.plots_scroll_area,1)
-        results_splitter.addWidget(plots_main_w)
-        results_splitter.setSizes([600,900]); main_layout.addWidget(results_splitter,1)
+        progress_gb.setMinimumHeight(300)
+        top_layout.addWidget(progress_gb)
 
-
-    def _connect_signals(self): # Same as before
-        self.run_selector.currentTextChanged.connect(self.on_run_selected)
-        self.refresh_runs_button.clicked.connect(self.populate_run_selector)
-        self.plot_ticker_selector.currentTextChanged.connect(self.on_plot_ticker_selected)
-        self.run_backtest_button.clicked.connect(self.on_start_new_backtest_clicked)
-
-    def _populate_new_run_strategy_selector(self): # Same as before
-        strategies = ["PastReturnsStrategy", "ReturnsVariationStrategy", "ReturnsVarCorrStrategy"]
-        self.new_run_strategy_selector.addItems(strategies)
-        if strategies: self.new_run_strategy_selector.setCurrentText("ReturnsVariationStrategy")
-
-    def _reset_live_monitor_ui(self, status_message="Status: Idle."):
-        logger.debug(f"Resetting live monitor UI with message: {status_message}")
-        self.status_label.setText(status_message)
-        self.progress_bar.setValue(0); self.progress_bar.setFormat("0%"); self.progress_bar.setRange(0,100)
-        self.eta_label.setText("ETA: N/A"); self.elapsed_time_label.setText("Elapsed: N/A")
+        bottom_widget = QWidget(); bottom_layout = QVBoxLayout(bottom_widget)
+        top_bottom_splitter.addWidget(bottom_widget)
         
-        # These are CRITICAL to reset
-        self.active_run_overall_start_time_monotonic = None
-        self.active_run_total_iterations = None
-        self.active_run_id_from_status = None
+        controls_group = QGroupBox("Completed Results Viewer"); controls_layout = QHBoxLayout(controls_group)
+        controls_layout.addWidget(QLabel("Select Backtest Run:")); controls_layout.addWidget(self.run_selector, 1)
+        controls_layout.addWidget(QLabel("View Ticker Details:")); controls_layout.addWidget(self.ticker_selector)
+        controls_layout.addStretch(); controls_layout.addWidget(self.save_results_button)
+        bottom_layout.addWidget(controls_group)
+        
+        results_splitter = QSplitter(Qt.Orientation.Horizontal); bottom_layout.addWidget(results_splitter)
+        results_splitter.addWidget(self.metrics_display)
+        
+        self.plot_stack = QStackedWidget(); results_splitter.addWidget(self.plot_stack)
+        
+        overall_page = QWidget(); overall_layout = QVBoxLayout(overall_page)
+        overall_layout.addWidget(self.equity_plot); overall_layout.addWidget(self.holdings_plot)
+        self.plot_stack.addWidget(overall_page)
+        
 
-    def on_start_new_backtest_clicked(self):
-        if self.backtest_thread and self.backtest_thread.isRunning():
-            QMessageBox.warning(self, "Backtest Running", "A backtest process is already running.")
+
+        
+        self.ticker_plot_page = QSplitter(Qt.Orientation.Vertical)
+        self.ticker_plot_page .addWidget(self.timeseries_plot);  self.ticker_plot_page .addWidget(self.scatter_plot);  self.ticker_plot_page .addWidget(self.residuals_plot);  self.ticker_plot_page .addWidget(self.residuals_time)
+        self.plot_stack.addWidget( self.ticker_plot_page )
+
+        self.ticker_plot_page.setSizes([400, 400, 400])
+        self.plot_stack.addWidget(self.ticker_plot_page)
+
+
+
+        top_bottom_splitter.setSizes([600, 800])
+        results_splitter.setSizes([450, 1150])
+     
+
+
+    def _connect_signals(self):
+        self.run_backtest_button.clicked.connect(self.on_start_new_backtest_clicked)
+        self.stop_backtest_button.clicked.connect(self.on_stop_backtest_clicked)
+        self.refresh_button.clicked.connect(self.on_refresh_button_clicked)
+        self.save_results_button.clicked.connect(self.on_save_results_clicked)
+        self.run_selector.currentTextChanged.connect(self.on_run_selected)
+        self.ticker_selector.currentTextChanged.connect(self.on_ticker_selected)
+        self.load_model_selector.currentTextChanged.connect(self._on_load_option_changed)
+        self.load_predictions_selector.currentTextChanged.connect(self._on_load_option_changed)
+        self.eta_countdown_timer.timeout.connect(self.update_eta_countdown)
+        
+        self.portfolio_strategy_selector.currentTextChanged.connect(self._on_strategy_changed)
+
+        self.new_run_force_retrain_steps_checkbox.toggled.connect(
+            lambda checked: self.retrain_frequency_input.setDisabled(checked)
+        )
+        self.retrain_frequency_input.textChanged.connect(
+            lambda text: self.new_run_force_retrain_steps_checkbox.setDisabled(bool(text.strip()))
+        )
+
+ 
+    def on_run_selected(self, run_id: str):
+        if not run_id or "--" in run_id:
+            self.clear_all_displays()
+            return
+        if run_id == self.current_run_id:
+            return
+        
+        self.load_and_display_run(run_id)
+
+
+    def on_ticker_selected(self, ticker: str):
+        if not self.run_data:
             return
 
-        base_cfg = self.new_run_base_config_input.text().strip()
-        profile_cfg = self.new_run_profile_config_input.text().strip()
-        model_scope = self.new_run_scope_selector.currentText()
-        tickers_str = self.new_run_tickers_input.text().strip()
-        feat_strat_key = self.new_run_strategy_selector.currentText()
-        train_pool_start = self.new_run_training_start_input.text().strip()
-        bt_start = self.new_run_bt_start_input.text().strip()
-        bt_end = self.new_run_bt_end_input.text().strip()
-        horizon_str = self.new_run_horizon_input.text().strip()
-        force_initial = self.new_run_force_retrain_checkbox.isChecked()
-        force_steps = self.new_run_force_retrain_steps_checkbox.isChecked()
+        has_predictions = self.merged_eval_df is not None and not self.merged_eval_df.empty
+        is_overall_view = not has_predictions or "--" in ticker
 
-        if not all([base_cfg, tickers_str, feat_strat_key, train_pool_start, bt_start, bt_end, horizon_str]):
-            QMessageBox.critical(self, "Input Error", "All fields for new backtest (except Profile Config) must be filled."); return
-        try: pred_horizon = int(horizon_str); assert pred_horizon > 0
-        except: QMessageBox.critical(self, "Input Error", "Prediction horizon must be a positive integer."); return
+        self.update_metrics_display(ticker)
 
-        command = ["docker-compose", "run", "--rm", "backtest-runner", "python", "-m", "app.cli"]
-        command.extend(["--base-config", base_cfg])
-        if profile_cfg: command.extend(["--profile-config", profile_cfg])
-        command.extend(["--mode", "backtest"]); command.extend(["--model-scope", model_scope])
-        command.extend(["--tickers-to-predict", tickers_str]); command.extend(["--feature-strategy-key", feat_strat_key])
-        command.extend(["--training-pool-start-date", train_pool_start]); command.extend(["--backtest-start-date", bt_start])
-        command.extend(["--backtest-end-date", bt_end]); command.extend(["--prediction-horizon-days", str(pred_horizon)])
-        if force_initial: command.append("--force-retrain-models")
-        if force_steps: command.append("--force-retrain-each-step")
-        command.append("--log-level"); command.append("DEBUG"); command.append("--output-artifacts-json")
+        if is_overall_view:
+            self.plot_stack.setCurrentIndex(0)
+            self.equity_plot.plot_equity_curve(self.equity_curve_df)
+            self.update_holdings_plot(self.run_data.get("portfolio_performance", {}).get("FinalHoldings", {}))
+            self.timeseries_plot.clear_plot(); self.scatter_plot.clear_plot(); self.residuals_plot.clear_plot()
+        else:
+            self.plot_stack.setCurrentIndex(1)
+            ticker_data = self.merged_eval_df[self.merged_eval_df['Ticker'] == ticker]
+            self.timeseries_plot.plot_time_series(ticker_data, ticker)
+            self.scatter_plot.plot_scatter(ticker_data, ticker)
+            self.residuals_plot.plot_residuals(ticker_data, ticker)
+            self.equity_plot.clear_plot(); self.holdings_plot.clear_plot()
 
-        self.log_view_area.clear()
-        self.process_subprocess_log_message("GUI_LOG: ---- Initiating New Dockerized Backtest ----")
-        self._reset_live_monitor_ui("Status: Starting Docker container...")
-        self.active_run_overall_start_time_monotonic = time.monotonic() # GUI's knowledge of when it launched the process
+    def on_refresh_button_clicked(self):
+        logger.info("--- User triggered full refresh ---")
+        self.initial_load()
+
+
+    def populate_run_selector(self, select_run_id: Optional[str] = None):
+        logger.info(f"Refreshing list of runs. Will try to select: {select_run_id}")
+        current_text = self.run_selector.currentText()
+        self.run_selector.blockSignals(True)
+        self.run_selector.clear()
+        available_runs = get_list_of_backtest_runs()
         
-        self.backtest_thread = BacktestRunnerThread(command, PROJECT_ROOT) # PROJECT_ROOT from data_loader
-        self.backtest_thread.log_message.connect(self.process_subprocess_log_message)
-        self.backtest_thread.process_finished.connect(self.on_backtest_process_finished)
-        self.backtest_thread.start()
-        self.run_backtest_button.setEnabled(False)
-        logger.info("New backtest process thread started by GUI.")
+        if not available_runs:
+            self.run_selector.addItem("-- No Runs Found --"); self.run_selector.setEnabled(False)
+            self.run_selector.blockSignals(False)
+            self.clear_all_displays(); return
+
+        self.run_selector.setEnabled(True); self.run_selector.addItems(available_runs)
+        target_selection = select_run_id or current_text
+        if target_selection in available_runs: self.run_selector.setCurrentText(target_selection)
+        else: self.run_selector.setCurrentIndex(0)
+        
+        logger.info(f"Run selector populated. Selected: {self.run_selector.currentText()}")
+        self.run_selector.blockSignals(False)
+        
+        self.on_run_selected(self.run_selector.currentText())
+
+    def populate_model_selector(self):
+        logger.info("Refreshing list of available pre-trained models...")
+        
+        self.load_model_selector.blockSignals(True)
+        
+        current_selection = self.load_model_selector.currentText()
+        self.load_model_selector.clear()
+        self.load_model_selector.addItem("")
+        
+        try:
+            models_dir = PROJECT_ROOT / "data" / "models"
+            if models_dir.exists():
+                model_ids = sorted([d.name for d in models_dir.iterdir() if d.is_dir()])
+                self.load_model_selector.addItems(model_ids)
+                logger.info(f"Found {len(model_ids)} existing models.")
+                
+                if current_selection in model_ids:
+                    self.load_model_selector.setCurrentText(current_selection)
+        except Exception as e:
+            logger.error(f"Could not list models in {models_dir}: {e}")
+        finally:
+            self.load_model_selector.blockSignals(False)
+            self.on_load_model_changed(self.load_model_selector.currentText())
+
+    def load_and_display_run(self, run_id: str):
+        logger.info(f"Loading data for run: {run_id}")
+        self.current_run_id = run_id
+        self.run_data = load_run_data(run_id)
+        
+        if not self.run_data:
+            self.clear_all_displays()
+            QMessageBox.critical(self, "Load Error", f"Could not load data for run:\n{run_id}")
+            return
+            
+        self.merged_eval_df = self.run_data.get('merged_eval_df', pd.DataFrame())
+        self.equity_curve_df = self.run_data.get('equity_curve_df', pd.DataFrame())
+        
+        self.save_results_button.setEnabled(True)
+
+        self.populate_ticker_selector()
+    
+    
+    def populate_ticker_selector(self):
+        self.ticker_selector.blockSignals(True)
+        self.ticker_selector.clear()
+
+        has_predictions = self.merged_eval_df is not None and not self.merged_eval_df.empty
+        if has_predictions:
+            self.ticker_selector.setEnabled(True)
+            self.ticker_selector.addItem("-- View Overall Run --")
+            tickers = sorted(self.merged_eval_df['Ticker'].unique())
+            self.ticker_selector.addItems(tickers)
+        else:
+            self.ticker_selector.addItem("-- Overall Run Only --")
+            self.ticker_selector.setEnabled(False)
+        
+        self.ticker_selector.blockSignals(False)
+        
+        self.on_ticker_selected(self.ticker_selector.currentText())
+
+
+    def update_metrics_display(self, ticker: str):
+        metrics_to_show = self.get_metrics_for_display(ticker)
+        self.metrics_display.display_metrics(metrics_to_show)
+    
+    def update_displays_for_run(self):
+        if not self.run_data: self.clear_all_displays(); return
+        
+        current_ticker = self.ticker_selector.currentText()
+        has_predictions = self.merged_eval_df is not None and not self.merged_eval_df.empty
+        is_overall_view = not has_predictions or "--" in current_ticker
+
+        self.update_metrics_display(current_ticker)
+        self.populate_ticker_selector()
+
+        if is_overall_view:
+            self.plot_stack.setCurrentIndex(0)
+            self.equity_plot.plot_equity_curve(self.equity_curve_df)
+            self.update_holdings_plot(self.run_data.get("portfolio_performance", {}).get("FinalHoldings", {}))
+        else:
+            self.plot_stack.setCurrentIndex(1)
+            ticker_data = self.merged_eval_df[self.merged_eval_df['Ticker'] == current_ticker]
+            self.timeseries_plot.plot_time_series(ticker_data, current_ticker)
+            self.scatter_plot.plot_scatter(ticker_data, current_ticker)
+            self.residuals_plot.plot_residuals(ticker_data, current_ticker)
+            self.residuals_time_plot.plot_residuals_vs_time(ticker_data, current_ticker)
+
+    def get_metrics_for_display(self, ticker: str) -> Dict:
+        if not self.run_data: return {}
+        
+        is_overall_view = ("--" in ticker or not ticker)
+        
+        metrics_to_display = {
+            "Wyniki Portfela": self.run_data.get("portfolio_performance", {})
+        }
+        
+        if "predictive_performance" in self.run_data and self.run_data["predictive_performance"]:
+            metrics_to_display["Ogólne Wyniki Predykcji"] = self.run_data.get("predictive_performance", {})
+            if not is_overall_view:
+                per_ticker_metrics = self.run_data.get('per_ticker_predictive_performance', {})
+                metrics_to_display[f"Wyniki Predykcji dla {ticker}"] = per_ticker_metrics.get(ticker, {})
+                
+        return metrics_to_display
+
+    def initial_load(self):
+        logger.info("Performing initial data load...")
+        self._populate_strategy_selectors()
+        
+        default_strategy = self.portfolio_strategy_selector.currentText()
+        if default_strategy:
+            self._on_strategy_changed(default_strategy)
+        
+        self.populate_model_selector()
+        self.populate_prediction_run_selector()
+        self.populate_run_selector()
+        self.clear_all_displays()
+
+        
+    def _on_load_option_changed(self, text: str):
+        model_to_load = self.load_model_selector.currentText().strip()
+        preds_to_load = self.load_predictions_selector.currentText().strip()
+
+        if preds_to_load:
+            self.set_training_controls_enabled(False)
+            self.set_date_controls_enabled(True)
+            self.load_model_selector.setDisabled(True)
+        elif model_to_load:
+            self.set_training_controls_enabled(False)
+            self.set_date_controls_enabled(True)
+            self.load_predictions_selector.setDisabled(True)
+        else:
+            self.set_training_controls_enabled(True)
+            self.set_date_controls_enabled(True)
+            self.load_model_selector.setDisabled(False)
+            self.load_predictions_selector.setDisabled(False)
+
+    def set_training_controls_enabled(self, is_enabled: bool):
+        self.new_run_force_retrain_checkbox.setEnabled(is_enabled)
+        self.new_run_force_retrain_steps_checkbox.setEnabled(is_enabled)
+        self.retrain_frequency_input.setEnabled(is_enabled)
+        self.save_model_as_input.setEnabled(is_enabled)
+        self.feature_engineering_strategy_selector.setEnabled(is_enabled)
+        self.model.setEnabled(is_enabled)
+        self.epochs_input.setEnabled(is_enabled)
+        self.batch_size_input.setEnabled(is_enabled)
+    
+    
+    
+    def set_date_controls_enabled(self, is_enabled: bool):
+        self.new_run_training_start_input.setEnabled(is_enabled)
+        self.new_run_bt_start_input.setEnabled(is_enabled)
+        self.new_run_bt_end_input.setEnabled(is_enabled)
+
+
+    def auto_set_dates_from_prediction_file(self, run_id: str):
+        try:
+            preds_filepath = get_raw_predictions_filepath(run_id)
+            if preds_filepath.exists():
+                df = pd.read_csv(preds_filepath)
+                df['PredictionDate'] = pd.to_datetime(df['PredictionDate'])
+                min_date, max_date = df['PredictionDate'].min(), df['PredictionDate'].max()
+                self.new_run_bt_start_input.setText(min_date.strftime('%Y-%m-%d'))
+                self.new_run_bt_end_input.setText(max_date.strftime('%Y-%m-%d'))
+                logger.info(f"Backtest dates automatically set from '{run_id}'")
+        except Exception as e:
+            logger.error(f"Error reading prediction file to set dates: {e}")
+
+
+    def on_load_model_changed(self, text: str):
+        is_loading = bool(text.strip())
+        self.new_run_force_retrain_checkbox.setDisabled(is_loading)
+        self.new_run_force_retrain_steps_checkbox.setDisabled(is_loading)
+        self.retrain_frequency_input.setDisabled(is_loading)
+        self.save_model_as_input.setDisabled(is_loading)
+
+
+
+
+
+    def populate_prediction_run_selector(self):
+        self.load_predictions_selector.blockSignals(True)
+        self.load_predictions_selector.clear()
+        self.load_predictions_selector.addItem("")
+        
+        try:
+            if not RAW_PREDICTIONS_DIR.exists():
+                logger.warning(f"Raw predictions directory not found at: {RAW_PREDICTIONS_DIR}")
+                self.load_predictions_selector.blockSignals(False)
+                return
+
+            runs_with_preds = [
+                file.stem.replace('predictions_', '') 
+                for file in RAW_PREDICTIONS_DIR.glob("predictions_*.csv")
+            ]
+            
+            self.load_predictions_selector.addItems(sorted(runs_with_preds, reverse=True))
+            logger.info(f"Found {len(runs_with_preds)} runs with saved predictions.")
+
+        except Exception as e:
+            logger.error(f"Could not list prediction files: {e}", exc_info=True)
+        finally:
+            self.load_predictions_selector.blockSignals(False)
+
+
+
+    def _populate_strategy_selectors(self):
+        feature_strategies = get_feature_engineering_strategies()
+        self.feature_engineering_strategy_selector.addItems(feature_strategies)
+        if "ReturnsRelativeStrengthStrategy" in feature_strategies:
+            self.feature_engineering_strategy_selector.setCurrentText("ReturnsRelativeStrengthStrategy")
+
+        portfolio_strategies = get_all_portfolio_strategies()
+        self.portfolio_strategy_selector.addItems(portfolio_strategies)
+        if "MarkowitzHistoric" in portfolio_strategies:
+            self.portfolio_strategy_selector.setCurrentText("MarkowitzHistoric")
+
+
+    def _reset_live_monitor_ui(self, status_message="Status: Idle."):
+        self.status_label.setText(status_message)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("0%")
+        self.eta_label.setText("ETA: N/A")
+        self.elapsed_time_label.setText("Elapsed: N/A")
+        
+ 
+        logger.debug("Live monitor UI elements reset.")
+
+
+    def get_next_run_increment(self) -> int:
+        try:
+            metrics_dir = PROJECT_ROOT / "data" / "metrics"
+            if not metrics_dir.exists(): return 1
+            max_num = 0
+            for file in metrics_dir.glob("*.json"):
+                match = re.search(r'^run(\d+)_', file.name)
+                if match:
+                    num = int(match.group(1))
+                    if num > max_num: max_num = num
+            return max_num + 1
+        except Exception:
+            return 1
+
+
+    def on_start_new_backtest_clicked(self):
+        try:
+            tickers_list = self.new_run_tickers_input.text().strip().split()
+            if not tickers_list or not tickers_list[0]:
+                QMessageBox.warning(self, "Input Error", "Please provide at least one ticker.")
+                return
+
+            portfolio_strategy = self.portfolio_strategy_selector.currentText()
+            feature_strategy = self.feature_engineering_strategy_selector.currentText()
+            model_name = self.model.currentText()
+            custom_run_name = self.save_model_as_input.text().strip()
+            
+            model_to_load = self.load_model_selector.currentText().strip()
+            predictions_to_load = self.load_predictions_selector.currentText().strip()
+
+            run_increment = self.get_next_run_increment()
+            run_id_parts = [f"run{run_increment:03d}"]
+
+            if custom_run_name:
+                safe_custom_name = re.sub(r'[\s\W]+', '_', custom_run_name).strip('_')
+                run_id_parts.append(safe_custom_name)
+
+            run_id_parts.append(portfolio_strategy)
+            
+            PREDICTIVE_STRATEGIES = get_predictive_strategies()
+            if portfolio_strategy in PREDICTIVE_STRATEGIES:
+                if predictions_to_load:
+                    run_id_parts.append("REUSED_PREDS")
+                else:
+                    run_id_parts.append(feature_strategy)
+                    run_id_parts.append(model_name)
+            
+            run_id_parts.append(datetime.now().strftime('%Y%m%d-%H%M%S'))
+            gui_generated_run_id = "_".join(run_id_parts)
+
+            python_command_parts = ["python", "-m", "app.cli", "--run-id", gui_generated_run_id]
+            
+            python_command_parts.extend(["--base-config", convert_host_path_to_container(PROJECT_ROOT / "configs" / self.new_run_base_config_input.text(), PROJECT_ROOT)])
+            if self.new_run_profile_config_input.text():
+                python_command_parts.extend(["--profile-config", convert_host_path_to_container(PROJECT_ROOT / "configs" / self.new_run_profile_config_input.text(), PROJECT_ROOT)])
+
+            python_command_parts.extend(["--mode", "backtest"])
+            python_command_parts.extend(["--tickers"] + tickers_list)
+            python_command_parts.extend(["--training-start-date", self.new_run_training_start_input.text()])
+            python_command_parts.extend(["--backtest-start-date", self.new_run_bt_start_input.text()])
+            python_command_parts.extend(["--backtest-end-date", self.new_run_bt_end_input.text()])
+            python_command_parts.extend(["--portfolio-strategy", portfolio_strategy])
+            python_command_parts.extend(["--top-k", self.top_k_input.text()])
+            python_command_parts.extend(["--rebalance-days", self.rebalance_days_input.text()])
+            
+            if self.allow_shorting_checkbox.isChecked():
+                python_command_parts.append("--allow-shorting")
+            
+            if self.fully_invested_checkbox.isChecked():
+                python_command_parts.append("--fully-invested")
+                
+
+            python_command_parts.extend(["--max-position-size", self.max_position_size_input.text()])
+            python_command_parts.extend(["--min-position-size", self.min_position_size_input.text()])
+            
+            python_command_parts.extend(["--lookback-period", self.lookback_period_input.text()])
+            python_command_parts.extend(["--entry-threshold", self.entry_threshold_input.text()])
+            python_command_parts.extend(["--market-ticker", self.market_ticker_input.text()])
+            
+            if self.enable_stop_loss_checkbox.isChecked():
+                python_command_parts.append("--enable-stop-loss-take-profit")
+                
+            if self.use_trailing_stop_checkbox.isChecked():
+                python_command_parts.append("--use-trailing-stop")
+            python_command_parts.extend(["--stop-loss-pct", self.stop_loss_pct_input.text()])
+            python_command_parts.extend(["--take-profit-pct", self.take_profit_pct_input.text()])
+            python_command_parts.extend(["--trailing-stop-pct", self.trailing_stop_pct_input.text()])
+            
+
+            
+
+            
+            if portfolio_strategy in PREDICTIVE_STRATEGIES:
+                python_command_parts.extend(["--feature-strategy", feature_strategy])
+                python_command_parts.extend(["--model-scope", self.new_run_scope_selector.currentText()])
+                python_command_parts.extend(["--prediction-horizon", self.new_run_horizon_input.text()])
+
+                if predictions_to_load:
+                    python_command_parts.extend(["--load-predictions-from-run", predictions_to_load])
+                elif model_to_load:
+                    python_command_parts.extend(["--load-model-id", model_to_load])
+                    python_command_parts.extend(["--model", model_name])
+                else:
+                    python_command_parts.extend(["--model", model_name])
+                    python_command_parts.extend(["--epochs", self.epochs_input.text()])
+                    python_command_parts.extend(["--batch-size", self.batch_size_input.text()])
+                    if self.new_run_force_retrain_checkbox.isChecked():
+                        python_command_parts.append("--force-retrain")
+                    if self.new_run_force_retrain_steps_checkbox.isChecked():
+                        python_command_parts.append("--force-retrain-steps")
+                    retrain_freq_str = self.retrain_frequency_input.text().strip()
+                    if retrain_freq_str.isdigit() and int(retrain_freq_str) > 0:
+                        python_command_parts.extend(["--retrain-frequency", retrain_freq_str])
+                    if custom_run_name:
+                        python_command_parts.extend(["--save-model-as", custom_run_name])
+
+            command = ["docker-compose", "run", "--rm", "backtest-runner"] + python_command_parts
+            
+            self.active_run_id_from_status = gui_generated_run_id
+            logger.info(f"GUI generated Run ID: {gui_generated_run_id}")
+            logger.info(f"Starting DOCKER backtest with command: {' '.join(command)}")
+
+            self.backtest_thread = BacktestRunnerThread(command, str(PROJECT_ROOT))
+            self.backtest_thread.log_message.connect(self.process_subprocess_log_message)
+            self.backtest_thread.process_finished.connect(self.on_backtest_process_finished)
+            
+            self.active_run_gui_start_time_monotonic = time.monotonic()
+            self.backtest_thread.start()
+
+            self.run_backtest_button.setEnabled(False)
+            self.stop_backtest_button.setEnabled(True)
+
+        except Exception as e:
+            logger.error(f"Error starting backtest: {e}", exc_info=True)
+            QMessageBox.critical(self, "Backtest Start Error", f"An error occurred while preparing the backtest: {e}")
+
+    def on_stop_backtest_clicked(self):
+        if self.backtest_thread and self.backtest_thread.isRunning():
+            logger.info("GUI: Stop button clicked. Attempting to stop backtest thread.")
+            self.backtest_thread.stop_process()
+            self.stop_backtest_button.setText("Stopping...")
+        else:
+            logger.info("GUI: Stop button clicked, but no backtest thread is active.")
+    
+
+    def on_backtest_process_finished(self, exit_code: int):
+        logger.info(f"GUI: Backtest subprocess finished (Code: {exit_code}).")
+        
+        run_id_that_just_finished = self.active_run_id_from_status
+        
+        self.active_run_id_from_status = None
+        self._reset_live_monitor_ui() 
+        self.run_backtest_button.setEnabled(True)
+        self.stop_backtest_button.setEnabled(False)
+        self.stop_backtest_button.setText("Stop Current Backtest")
+        
+        if exit_code == 0:
+            QTimer.singleShot(500, self.on_refresh_button_clicked)
+            
+            if run_id_that_just_finished:
+                 QTimer.singleShot(1000, lambda: self.populate_run_selector(select_run_id=run_id_that_just_finished))
+        else:
+            QMessageBox.critical(self, "Backtest Error", f"Backtest failed with exit code: {exit_code}. Please check the logs for details.")
+    
+
+    def update_eta_countdown(self):
+        if self.eta_seconds_remaining > 0:
+            self.eta_seconds_remaining -= 1
+            eta_countdown_str = str(timedelta(seconds=self.eta_seconds_remaining))
+            self.eta_label.setText(f"ETA: {eta_countdown_str}")
+        else:
+            self.eta_countdown_timer.stop()
+            self.eta_label.setText("ETA: Finishing...")
+
+    def on_save_results_clicked(self):
+        if not self.current_run_id or not self.run_data:
+            QMessageBox.warning(self, "Brak Danych", "Proszę wybrać przebieg testu do zapisania.")
+            return
+
+        report_dir = PLOTS_DIR / self.current_run_id
+        try:
+            report_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Saving essential report to directory: {report_dir}")
+
+            self.equity_plot.save_to_file(str(report_dir / "plot_equity_curve.png"))
+            self.holdings_plot.save_to_file(str(report_dir / "plot_final_holdings.png"))
+
+            if self.equity_curve_df is not None and not self.equity_curve_df.empty:
+                equity_curve_csv_path = report_dir / "equity_curve.csv"
+                self.equity_curve_df.to_csv(equity_curve_csv_path, index=False)
+                logger.info(f"Equity curve data saved to {equity_curve_csv_path}")
+
+            metrics_file_path = report_dir / "metrics_summary.txt"
+            with open(metrics_file_path, 'w', encoding='utf-8') as f:
+                f.write(f"Podsumowanie wyników dla przebiegu: {self.current_run_id}\n")
+                f.write("="*80 + "\n\n")
+                
+                metrics_to_save = self.get_metrics_for_display("-- View Overall Run --")
+                if "per_ticker_predictive_performance" in self.run_data:
+                    metrics_to_save["Wyniki Predykcji (per Ticker)"] = self.run_data["per_ticker_predictive_performance"]
+                
+                for title, metrics_dict in metrics_to_save.items():
+                    f.write(f"--- {title} ---\n")
+                    if not metrics_dict:
+                        f.write("  Brak danych.\n")
+                    else:
+                        for key, value in metrics_dict.items():
+                            if isinstance(value, dict):
+                                f.write(f"  {key}:\n")
+                                for sub_key, sub_val in value.items():
+                                    f.write(f"    - {sub_key+':':<25} {sub_val}\n")
+                            elif isinstance(value, (int, float)):
+                                f.write(f"  {key+':':<30} {value: >10.4f}\n")
+                            else:
+                                f.write(f"  {key+':':<30} {value}\n")
+                    f.write("\n")
+            logger.info(f"Metrics summary saved to {metrics_file_path}")
+
+            if self.merged_eval_df is not None and not self.merged_eval_df.empty:
+                predictions_csv_path = report_dir / "predictions_and_actuals.csv"
+                self.merged_eval_df.to_csv(predictions_csv_path, index=False)
+                logger.info(f"Prediction data saved to {predictions_csv_path}")
+            
+            QMessageBox.information(self, "Zapisano Pomyślnie", f"Raport został zapisany w folderze:\n{report_dir}")
+
+        except Exception as e:
+            logger.error(f"Failed to save report: {e}", exc_info=True)
+            QMessageBox.critical(self, "Błąd Zapisu", f"Wystąpił błąd podczas zapisywania raportu: {e}")
+        
+    def clear_all_displays(self):
+        self.current_run_id = None
+        self.run_data = None
+        self.merged_eval_df = pd.DataFrame()
+        self.equity_curve_df = pd.DataFrame()
+        
+        self.metrics_display.display_metrics({})
+        self.equity_plot.clear_plot("Wybierz przebieg testu")
+        self.holdings_plot.clear_plot("No holdings data")
+        self.timeseries_plot.clear_plot()
+        self.scatter_plot.clear_plot()
+        self.residuals_plot.clear_plot()
+        self.residuals_time.clear_plot()
+        
+        self.ticker_selector.blockSignals(True)
+        self.ticker_selector.clear(); self.ticker_selector.addItem("-- Brak Danych --")
+        self.ticker_selector.setEnabled(False)
+        self.ticker_selector.blockSignals(False)
+        
+        self.save_results_button.setEnabled(False)
+   
+
+    def update_holdings_plot(self, holdings_data):
+        if not holdings_data:
+            self.holdings_plot.clear_plot("No holdings data available")
+            return
+        
+        self.holdings_plot.plot_final_holdings(holdings_data)
 
     def process_subprocess_log_message(self, message: str):
+            
+        scrollbar = self.log_view_area.verticalScrollBar()
+        
+        is_at_bottom = scrollbar.value() >= (scrollbar.maximum() - 10)
+
         self.log_view_area.append(message)
-        if self.log_view_area.verticalScrollBar is True:
-            self.log_view_area.verticalScrollBar().setValue(self.log_view_area.verticalScrollBar().maximum())
+
+        if is_at_bottom:
+            scrollbar.setValue(scrollbar.maximum())
+
         if message.startswith(STATUS_UPDATE_PREFIX):
             try:
                 status_json_str = message[len(STATUS_UPDATE_PREFIX):]
                 status_data = json.loads(status_json_str)
                 self.update_gui_from_status_data(status_data)
-            except Exception as e: logger.error(f"GUI: Error processing status update: {e} - Data: {message}", exc_info=True)
+            except Exception as e: 
+                logger.error(f"GUI: Error processing status: {e} - Data: {message}", exc_info=True)
         
     def update_gui_from_status_data(self, status_data: Dict[str, Any]):
-        if not all([self.status_label, self.progress_bar, self.eta_label, self.elapsed_time_label]): return
+        if run_id := status_data.get('run_id_for_gui'): self.active_run_id_from_status = run_id
 
-        status_run_id = status_data.get("run_id_for_gui")
-        current_iter = status_data.get("current_iteration", 0)
-        total_iter_from_status = status_data.get("total_iterations_approx", 0)
         status_msg = status_data.get('status_message', 'N/A')
-        time_per_iter_from_status_ema = status_data.get("time_per_iteration_sec")
-        is_final_status = status_data.get("is_final_run_status", False)
-        # This is the monotonic start time *reported by run_system.py*
-        process_start_monotonic_from_status = status_data.get("overall_start_time_unix")
-
-        # Latch onto total iterations for the run ID reported by the status
-        if status_run_id and (self.active_run_id_from_status != status_run_id or self.active_run_total_iterations is None):
-            self.active_run_id_from_status = status_run_id
-            self.active_run_total_iterations = total_iter_from_status
-            # If the GUI didn't start this specific run (e.g., GUI restarted),
-            # use the start time from the status for elapsed calculation.
-            if self.active_run_overall_start_time_monotonic is None and process_start_monotonic_from_status is not None:
-                 self.active_run_overall_start_time_monotonic = process_start_monotonic_from_status
-            logger.info(f"GUI: Monitoring run '{status_run_id}'. Total It: {self.active_run_total_iterations}, Ref Start: {self.active_run_overall_start_time_monotonic}")
-
-
-        overall_start_from_status_monotonic = status_data.get("overall_start_time_unix")
-
-        if (self.active_run_id_from_status is None and status_run_id) or \
-           (status_run_id and self.active_run_id_from_status != status_run_id):
-            
-            self.active_run_id_from_status = status_run_id
-            self.active_run_total_iterations = status_data.get("total_iterations_approx")
-            # USE the start time reported by run_system.py as the authoritative start
-            self.active_run_overall_start_time_monotonic = overall_start_from_status_monotonic
-            logger.info(f"GUI: Monitoring run '{self.active_run_id_from_status}'. "
-                        f"Process Start Ref: {self.active_run_overall_start_time_monotonic}, "
-                        f"Total It: {self.active_run_total_iterations}")
-
+        current_iter = status_data.get("current_iteration", 0)
+        total_iter = status_data.get("total_iterations_approx", 0)
         self.status_label.setText(f"Status: {status_msg}")
-        
-        display_total_iter = self.active_run_total_iterations or 0
-        
-        progress_val = 0
-        if display_total_iter > 0:
-            progress_val = min(100, int((current_iter / display_total_iter) * 100))
-        if is_final_status:
-            progress_val = 100
-            if display_total_iter > 0: current_iter = display_total_iter
-
-        self.progress_bar.setRange(0, display_total_iter if display_total_iter > 0 else 100)
-        self.progress_bar.setValue(current_iter if display_total_iter > 0 and current_iter <= display_total_iter else progress_val)
-        self.progress_bar.setFormat(f"{progress_val}% ({current_iter}/{display_total_iter if display_total_iter > 0 else '?'})")
-        logger.debug(f"GUI STATUS UPDATE RECEIVED: {status_data}")
-        logger.debug(f"BEFORE LATCH: self.active_run_id_from_status={self.active_run_id_from_status}, self.active_run_overall_start_time_monotonic={self.active_run_overall_start_time_monotonic}")
-# ... the latching logic ...
-        logger.debug(f"AFTER LATCH: self.active_run_id_from_status={self.active_run_id_from_status}, self.active_run_overall_start_time_monotonic={self.active_run_overall_start_time_monotonic}")
-        if self.active_run_overall_start_time_monotonic is not None:
-            elapsed_seconds = time.monotonic() - self.active_run_overall_start_time_monotonic
-            self.elapsed_time_label.setText(f"Elapsed: {str(datetime.timedelta(seconds=int(elapsed_seconds)))}")
-
-            if is_final_status:
-                self.eta_label.setText("ETA: Completed" if "error" not in status_msg.lower() else "ETA: Error")
-            elif display_total_iter > 0 and current_iter > 0 : # Must have total iterations and some progress
-                effective_time_per_iter = 0.0
-                if time_per_iter_from_status_ema and time_per_iter_from_status_ema > 0.01:
-                    effective_time_per_iter = time_per_iter_from_status_ema
-                elif elapsed_seconds > 0.1 and current_iter > 0: # Fallback only if EMA is bad and we have elapsed time
-                    effective_time_per_iter = elapsed_seconds / current_iter
-                
-                if effective_time_per_iter > 0.001:
-                    remaining_iters = display_total_iter - current_iter
-                    if remaining_iters >= 0:
-                        eta_seconds = remaining_iters * effective_time_per_iter
-                        self.eta_label.setText(f"ETA: {str(datetime.timedelta(seconds=int(eta_seconds)))}")
-                    else: self.eta_label.setText("ETA: Finishing...")
-                else: self.eta_label.setText("ETA: Calculating (short iter time)...")
-            elif not is_final_status: self.eta_label.setText("ETA: Calculating (iter 0)...")
-        elif is_final_status: # Final, but GUI didn't have a start time for it
-            self.elapsed_time_label.setText("Elapsed: N/A (run completed)"); self.eta_label.setText("ETA: Completed")
-        else: # No GUI-tracked start and not final
-            self.elapsed_time_label.setText("Elapsed: N/A"); self.eta_label.setText("ETA: N/A")
-
-
-    def on_backtest_process_finished(self, exit_code: int):
-        logger.info(f"GUI: Backtest subprocess finished (Code: {exit_code}).")
-        if self.backtest_thread: self.backtest_thread = None
-        self.run_backtest_button.setEnabled(True)
-        
-        # Update UI to a final state based on the last known status or exit code
-        last_status_msg = self.status_label.text()
-        if exit_code == 0:
-            if "completed" not in last_status_msg.lower() and "error" not in last_status_msg.lower():
-                 self._reset_live_monitor_ui("Status: Completed. Refreshing results...")
-                 self.progress_bar.setValue(self.progress_bar.maximum()); self.progress_bar.setFormat("100% (Done)")
-                 self.eta_label.setText("ETA: Completed")
-            logger.info("Backtest successful. Triggering runs list refresh.")
-            QTimer.singleShot(1500, self.populate_run_selector)
+        self.progress_bar.setValue(status_data.get("progress_percent", 0))
+        self.progress_bar.setFormat(f"{status_data.get('progress_percent', 0)}% ({current_iter}/{total_iter})")
+        if self.active_run_gui_start_time_monotonic is not None:
+            elapsed_seconds = time.monotonic() - self.active_run_gui_start_time_monotonic
+            self.elapsed_time_label.setText(f"Elapsed: {str(timedelta(seconds=int(elapsed_seconds)))}")
         else:
-            error_ui_msg = f"Status: ERROR (Code: {exit_code}). Check Output Log."
-            if "error" not in last_status_msg.lower(): # Avoid overwriting specific error from status update
-                self._reset_live_monitor_ui(error_ui_msg)
-                self.progress_bar.setValue(self.progress_bar.maximum()); self.progress_bar.setFormat("Error")
-                self.eta_label.setText("ETA: Error")
-            logger.error(error_ui_msg.replace("Status: ", ""))
-            QMessageBox.critical(self, "Backtest Execution Error", error_ui_msg.replace("Status: ", ""))
-        
-        # Important: Reset these regardless of success/failure for the next GUI-initiated run
-        self.active_run_overall_start_time_monotonic = None
-        self.active_run_total_iterations = None
-        self.active_run_id_from_status = None
-    
-    
-    
-    
-    def _clear_layout(self, layout: Optional[QLayout]): # Your previous robust version
-        if layout is not None:
-            while layout.count():
-                item = layout.takeAt(0)
-                if item is not None: 
-                    widget = item.widget()
-                    if widget: widget.setParent(None); widget.deleteLater()
-                    else:
-                        sub_layout = item.layout()
-                        if sub_layout: self._clear_layout(sub_layout)
-    
-    def _create_metrics_table(self, df: pd.DataFrame) -> QTableWidget: # Your previous robust version
-        if df.empty: tbl=QTableWidget(0,0); tbl.setVisible(False); return tbl
-        tbl=QTableWidget(df.shape[0], df.shape[1]); str_cols=[str(c) for c in df.columns]; tbl.setColumnCount(len(str_cols)); tbl.setHorizontalHeaderLabels(str_cols)
-        for r_idx in range(df.shape[0]):
-            for c_idx, col_name in enumerate(str_cols): # Iterate over str_cols for df.iloc
-                val = df.iloc[r_idx, c_idx] 
-                item_str=f"{val:.4f}" if isinstance(val,(float,np.floating)) and not pd.isna(val) and val!=int(val) else (str(int(val)) if isinstance(val,(float,np.floating)) and not pd.isna(val) and val==int(val) else ("N/A" if pd.isna(val) else str(val)))
-                item=QTableWidgetItem(item_str)
-                if isinstance(val,(float,np.floating,int,np.integer)) and not pd.isna(val): item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter|Qt.AlignmentFlag.AlignRight)
-                else: item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter|Qt.AlignmentFlag.AlignLeft)
-                tbl.setItem(r_idx,c_idx,item)
-        tbl.resizeColumnsToContents(); tbl.setAlternatingRowColors(True); tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows); tbl.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        horizontal_header = tbl.horizontalHeader()
-        header_h = horizontal_header.height() if horizontal_header is not None else 25
-        content_h = sum(tbl.rowHeight(i) for i in range(tbl.rowCount()))
-        total_h = header_h + content_h + 10 
-        min_h_sensible = header_h + (25 if tbl.rowCount() == 0 else 50) 
-        final_h = max(min_h_sensible, total_h)
-        tbl.setMinimumHeight(final_h); tbl.setMaximumHeight(final_h + 20)
-        tbl.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff); tbl.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        return tbl
+            self.elapsed_time_label.setText("Elapsed: N/A")
 
-    
-    def display_loaded_run_data(self):
-        self.clear_results_display()
-
-        if not self.current_run_data:
-            if self.metrics_layout: self.metrics_layout.addWidget(QLabel(f"Failed to load data for run: {self.run_selector.currentText()}"))
-            return
-
-        run_id_disp = self.current_run_data.get('run_id', 'N/A')
-        if self.metrics_layout: self.metrics_layout.addWidget(QLabel(f"<b>Displaying Results for Run: {run_id_disp}</b>"))
-        
-        overall_metrics = self.current_run_data.get('overall_horizon_metrics', {})
-        if overall_metrics and self.metrics_layout:
-            self.metrics_layout.addWidget(QLabel("<b>Overall Metrics per Horizon:</b>"))
-            overall_data_for_table = []
-            # Convert string keys from JSON (horizons) to int for sorting
-            try:
-                sorted_horizons = sorted([int(h) for h in overall_metrics.keys()])
-            except ValueError:
-                logger.error(f"Could not convert all horizon keys in overall_metrics to int: {overall_metrics.keys()}")
-                sorted_horizons = sorted(overall_metrics.keys()) # Fallback to string sort
-
-            for horizon_key in sorted_horizons: # Iterate using sorted keys
-                metrics = overall_metrics.get(str(horizon_key), {}) # Access with original string key from JSON
-                
-                row: Dict[str, Any] = {"Horizon": int(horizon_key)} # Ensure horizon is int
-                
-                for k, v_metric in metrics.items():
-                    # Let DataFrame handle initial type inference, preserve NaN for numerics
-                    if pd.isna(v_metric):
-                        row[k] = np.nan 
-                    elif isinstance(v_metric, (float, np.floating, int, np.integer)):
-                        row[k] = v_metric # Keep as number
-                    else:
-                        # Attempt to convert to number if possible, otherwise string
-                        try:
-                            num_v = float(v_metric) # Try float first
-                            if num_v == int(num_v): # Check if it's a whole number
-                                row[k] = int(num_v)
-                            else:
-                                row[k] = num_v
-                        except (ValueError, TypeError):
-                            row[k] = str(v_metric) # Fallback to string
-                overall_data_for_table.append(row)
+        if not self.eta_countdown_timer.isActive():
             
-            if overall_data_for_table:
-                df_overall = pd.DataFrame(overall_data_for_table)
-                # Ensure 'Horizon' is first column for display
-                if 'Horizon' in df_overall.columns:
-                    cols = ['Horizon'] + [col for col in df_overall.columns if col != 'Horizon']
-                    df_overall = df_overall[cols]
+            time_first = status_data.get("time_for_first_iter")
+            time_second = status_data.get("time_for_second_iter")
+            
+            if time_first is not None and time_second is not None:
                 
-                table = self._create_metrics_table(df_overall)
-                self.metrics_layout.addWidget(table)
+                retrain_freq_str = self.retrain_frequency_input.text().strip()
+                retrain_freq = int(retrain_freq_str) if retrain_freq_str.isdigit() and int(retrain_freq_str) > 0 else 0
+                is_loading_model = bool(self.load_model_selector.currentText().strip())
+                is_retrain_every_step = self.new_run_force_retrain_steps_checkbox.isChecked()
+
+                est_train_time = time_first
+                est_predict_time = time_second
+                
+                if is_loading_model:
+                    est_train_time = est_predict_time
+
+                total_iterations = status_data.get("total_iterations_approx", 1)
+                current_iteration = status_data.get("current_iteration", 2)
+                remaining_steps = total_iterations - current_iteration
+
+                num_future_trains = 0
+                if not is_loading_model and remaining_steps > 0:
+                    if is_retrain_every_step:
+                        num_future_trains = remaining_steps
+                    elif retrain_freq > 0:
+                        days_since_last = status_data.get("days_since_last_train", 1)
+                        steps_to_next_train = retrain_freq - days_since_last
+                        if steps_to_next_train <= 0: steps_to_next_train = retrain_freq
+
+                        if remaining_steps >= steps_to_next_train:
+                            remaining_after_next = remaining_steps - steps_to_next_train
+                            num_future_trains = 1 + (remaining_after_next // retrain_freq)
+                
+                num_future_predicts = remaining_steps - num_future_trains
+
+                eta_seconds = int((num_future_trains * est_train_time) + (num_future_predicts * est_predict_time))
+
+                self.eta_seconds_remaining = eta_seconds
+                self.eta_label.setText(f"ETA: {str(timedelta(seconds=eta_seconds))}")
+                self.eta_countdown_timer.stop()
+                self.eta_countdown_timer.start(1000)
+                logger.info(f"Smart ETA calculated: {eta_seconds}s ({num_future_trains} train, {num_future_predicts} predict steps remaining).")
+
+            elif self.active_run_gui_start_time_monotonic is not None:
+                self.eta_label.setText("ETA: Calculating...")
+
+    def _on_strategy_changed(self, strategy_name: str):
+        if not strategy_name:
+            return
+            
+        logger.info(f"Strategy changed to: {strategy_name}")
+        
+        strategy_params = {
+            'MarkowitzHistoric': {
+                'essential': ['lookback_period', 'top_k', 'rebalance_days', 'allow_shorting', 
+                            'fully_invested', 'max_position_size', 'min_position_size', 'entry_threshold'],
+                'risk_management': ['enable_stop_loss', 'stop_loss_pct', 'take_profit_pct', 
+                                  'trailing_stop_pct', 'use_trailing_stop']
+            },
+            'MarkowitzHistoricEfficientReturn': {
+                'essential': ['lookback_period', 'top_k', 'rebalance_days', 'allow_shorting',
+                            'fully_invested', 'max_position_size', 'min_position_size', 'entry_threshold'],
+                'risk_management': ['enable_stop_loss', 'stop_loss_pct', 'take_profit_pct',
+                                  'trailing_stop_pct', 'use_trailing_stop']            },
+            'MinSemiVarianceHistoric': {
+                'essential': ['lookback_period', 'top_k', 'rebalance_days', 'allow_shorting',
+                            'fully_invested', 'max_position_size', 'min_position_size', 'entry_threshold'],
+                'risk_management': ['enable_stop_loss', 'stop_loss_pct', 'take_profit_pct',
+                                  'trailing_stop_pct', 'use_trailing_stop']
+            },
+            'MeanCVaRHistoric': {
+                'essential': ['lookback_period', 'top_k', 'rebalance_days', 'allow_shorting',
+                            'fully_invested', 'max_position_size', 'min_position_size', 'entry_threshold'],
+                'risk_management': ['enable_stop_loss', 'stop_loss_pct', 'take_profit_pct',
+                                  'trailing_stop_pct', 'use_trailing_stop']
+            },
+            
+            'MarkowitzPredicted': {
+                'essential': ['lookback_period', 'top_k', 'rebalance_days', 'allow_shorting',
+                            'fully_invested', 'max_position_size', 'min_position_size', 'entry_threshold'],
+                'risk_management': ['enable_stop_loss', 'stop_loss_pct', 'take_profit_pct',
+                                  'trailing_stop_pct', 'use_trailing_stop']
+            },
+            'EnhancedMarkowitzPredicted': {
+                'essential': ['lookback_period', 'top_k', 'rebalance_days', 'allow_shorting',
+                            'fully_invested', 'max_position_size', 'min_position_size', 'entry_threshold'],
+                'risk_management': ['enable_stop_loss', 'stop_loss_pct', 'take_profit_pct',
+                                  'trailing_stop_pct', 'use_trailing_stop'],
+                'advanced': ['use_shrinkage']
+            },
+            'TopKPredicted': {
+                'essential': ['lookback_period', 'top_k', 'rebalance_days', 'allow_shorting',
+                            'fully_invested', 'max_position_size', 'min_position_size', 'entry_threshold'],
+                'risk_management': ['enable_stop_loss', 'stop_loss_pct', 'take_profit_pct',
+                                  'trailing_stop_pct', 'use_trailing_stop'],
+                'advanced': ['use_shrinkage']
+            },
+            'MinSemiVariancePredicted': {
+                'essential': ['lookback_period', 'top_k', 'rebalance_days', 'allow_shorting',
+                            'fully_invested', 'max_position_size', 'min_position_size','entry_threshold' ],
+                'risk_management': ['enable_stop_loss', 'stop_loss_pct', 'take_profit_pct',
+                                  'trailing_stop_pct', 'use_trailing_stop'],
+                'advanced': ['use_shrinkage']
+            },
+            'MinCVaRPredicted': {
+                'essential': ['lookback_period', 'top_k', 'rebalance_days', 'allow_shorting',
+                            'fully_invested', 'max_position_size', 'min_position_size', 'entry_threshold'],
+                'risk_management': ['enable_stop_loss', 'stop_loss_pct', 'take_profit_pct',
+                                  'trailing_stop_pct', 'use_trailing_stop'],
+                'advanced': ['use_shrinkage']
+            },
+            'PredictiveMomentumFilter': {
+                'essential': ['lookback_period', 'top_k', 'rebalance_days', 'allow_shorting',
+                            'fully_invested', 'max_position_size', 'min_position_size', 'entry_threshold'],
+                'risk_management': ['enable_stop_loss', 'stop_loss_pct', 'take_profit_pct',
+                                'trailing_stop_pct', 'use_trailing_stop'],
+                'advanced': ['use_shrinkage']
+            }
+
+            
+        }
+        
+        strategy_config = strategy_params.get(strategy_name, {})
+        
+        param_widgets = {
+            'lookback_period': self.lookback_period_input,
+            'top_k': self.top_k_input,
+            'rebalance_days': self.rebalance_days_input,
+            'allow_shorting': self.allow_shorting_checkbox,
+            'fully_invested': self.fully_invested_checkbox,
+            'max_position_size': self.max_position_size_input,
+            'min_position_size': self.min_position_size_input,
+            'entry_threshold': self.entry_threshold_input,
+            'enable_stop_loss': self.enable_stop_loss_checkbox,
+            'stop_loss_pct': self.stop_loss_pct_input,
+            'take_profit_pct': self.take_profit_pct_input,
+            'trailing_stop_pct': self.trailing_stop_pct_input,
+            'use_trailing_stop': self.use_trailing_stop_checkbox,
+        }
+        
+        for param_name, widget in param_widgets.items():
+            if param_name in strategy_config.get('essential', []):
+                widget.setVisible(True)
+                widget.setEnabled(True)
+                widget.setStyleSheet("")
+            elif param_name in strategy_config.get('risk_management', []):
+                widget.setVisible(True)
+                widget.setEnabled(True)
+                widget.setStyleSheet("")
+            elif param_name in strategy_config.get('advanced', []):
+                widget.setVisible(True)
+                widget.setEnabled(True)
+                widget.setStyleSheet("")
             else:
-                self.metrics_layout.addWidget(QLabel("No overall metrics data to display."))
-        elif self.metrics_layout:
-            self.metrics_layout.addWidget(QLabel("No overall metrics data structure found for this run."))
+                widget.setVisible(False)
+                widget.setEnabled(False)
+                widget.setStyleSheet("color: gray; background-color: #f0f0f0;")
         
-        if self.metrics_layout: self.metrics_layout.addSpacing(10) # Add some spacing
-
-        # --- Per-Ticker Metrics Display (similar logic) ---
-        per_ticker_metrics = self.current_run_data.get('per_ticker_horizon_metrics', {})
-        predictions_df = self.current_run_data.get('predictions_df') # Used to get ticker list
-
-        if per_ticker_metrics and predictions_df is not None and not predictions_df.empty and self.metrics_layout:
-            # For simplicity, let's make a dropdown for ticker selection for detailed metrics
-            # Or just show the first one as before
-            example_ticker = predictions_df['Ticker'].unique()[0]
-            if example_ticker in per_ticker_metrics:
-                self.metrics_layout.addWidget(QLabel(f"<b>Per-Ticker Metrics for {example_ticker} (per Horizon):</b>"))
-                ticker_metric_table_data = []
-                ticker_horizons_data = per_ticker_metrics[example_ticker]
-                try:
-                    sorted_ticker_horizons = sorted([int(h) for h in ticker_horizons_data.keys()])
-                except ValueError:
-                    sorted_ticker_horizons = sorted(ticker_horizons_data.keys())
-
-                for horizon_key in sorted_ticker_horizons:
-                    metrics = ticker_horizons_data.get(str(horizon_key), {})
-                    row_ticker: Dict[str, Any] = {"Horizon": int(horizon_key)}
-                    for k, v_metric in metrics.items():
-                        if pd.isna(v_metric): row_ticker[k] = np.nan
-                        elif isinstance(v_metric, (float, np.floating, int, np.integer)): row_ticker[k] = v_metric
-                        else:
-                            try:
-                                num_v = float(v_metric); row_ticker[k] = int(num_v) if num_v == int(num_v) else num_v
-                            except (ValueError, TypeError): row_ticker[k] = str(v_metric)
-                    ticker_metric_table_data.append(row_ticker)
-                
-                if ticker_metric_table_data:
-                    df_ticker_metrics = pd.DataFrame(ticker_metric_table_data)
-                    if 'Horizon' in df_ticker_metrics.columns: # Ensure Horizon is first
-                        cols_tick = ['Horizon'] + [col for col in df_ticker_metrics.columns if col != 'Horizon']
-                        df_ticker_metrics = df_ticker_metrics[cols_tick]
-                    table_ticker = self._create_metrics_table(df_ticker_metrics)
-                    self.metrics_layout.addWidget(table_ticker)
-        elif self.metrics_layout:
-            self.metrics_layout.addWidget(QLabel("No per-ticker metrics data found or no predictions to determine tickers."))
-
-        if self.metrics_layout: self.metrics_layout.addSpacing(10)
-
-        predictions_df = self.current_run_data.get('predictions_df')
-        if predictions_df is not None and not predictions_df.empty and self.plot_ticker_selector:
-            unique_tickers = sorted(predictions_df['Ticker'].unique())
-            self.plot_ticker_selector.blockSignals(True)
-            current_plot_ticker = self.plot_ticker_selector.currentText()
-            self.plot_ticker_selector.clear()
-            self.plot_ticker_selector.addItems(unique_tickers)
-            if current_plot_ticker in unique_tickers:
-                self.plot_ticker_selector.setCurrentText(current_plot_ticker)
-            elif unique_tickers:
-                self.plot_ticker_selector.setCurrentIndex(0)
-            self.plot_ticker_selector.blockSignals(False)
-            
-            # Manually trigger if text actually changed or if it's the first population
-            if self.plot_ticker_selector.currentText() and \
-               (self.plot_ticker_selector.property("last_selected_text") != self.plot_ticker_selector.currentText() or \
-                not self.plots_display_layout.count()): # Check if plots area is empty
-                self.on_plot_ticker_selected(self.plot_ticker_selector.currentText())
-            self.plot_ticker_selector.setProperty("last_selected_text", self.plot_ticker_selector.currentText())
-
-        elif self.plots_display_layout:
-             self.plots_display_layout.addWidget(QLabel("No prediction data available to generate plots."))
-        
-        if self.metrics_layout: self.metrics_layout.addStretch(1)
-
-    def load_selected_run_data(self):
-        selected_run_id = self.run_selector.currentText()
-        if not selected_run_id:
-            self.clear_results_display()
-            if self.metrics_layout: self.metrics_layout.addWidget(QLabel("No run selected."))
-            return
-        logger.info(f"Loading data for completed run: {selected_run_id}")
-        self.current_run_data = load_run_data(selected_run_id)
-        self.display_loaded_run_data()
-
-    def clear_results_display(self): # Your previous robust version
-        self._clear_layout(self.metrics_layout)
-        self._clear_layout(self.plots_display_layout)
-        if self.plot_ticker_selector:
-            self.plot_ticker_selector.blockSignals(True); self.plot_ticker_selector.clear(); self.plot_ticker_selector.blockSignals(False)
-
-    def on_run_selected(self, run_id: str):
-            if not run_id: self.clear_results_display(); return
-            if self.current_run_data and self.current_run_data.get('run_id') == run_id: return
-            self.load_selected_run_data()
-
-
-    def _create_scatter_plot_image(self, df: pd.DataFrame, ticker: str, run_id_suffix: str) -> Optional[str]: # Your previous robust version
-        if df.empty or 'ActualValue' not in df.columns or 'PredictedReturn' not in df.columns: return None
-        try:
-            fig, ax = plt.subplots(figsize=(7,7)); ax.scatter(df['ActualValue'], df['PredictedReturn'], alpha=0.6, s=25, ec='k', lw=0.3, label="Preds")
-            all_v = pd.concat([df['ActualValue'], df['PredictedReturn']]).dropna();
-            if all_v.empty: min_v,max_v = -0.05,0.05
-            else: min_v,max_v = all_v.min(),all_v.max()
-            pad = (max_v-min_v)*0.1 if (max_v-min_v)>1e-6 else 0.01; lims=[min_v-pad,max_v+pad]
-            ax.plot(lims,lims,'r--',alpha=0.7,zorder=0,label="y=x"); ax.set_xlabel("Actual"); ax.set_ylabel("Predicted")
-            ax.set_title(f"Scatter: {ticker} ({run_id_suffix[:30]})"); ax.grid(True,ls=':',alpha=0.5);ax.axhline(0,c='k',lw=0.5,ls='--');ax.axvline(0,c='k',lw=0.5,ls='--')
-            ax.legend(); fig.tight_layout()
-            gui_plots_dir = os.path.join(PROJECT_ROOT, "data", "gui_temp_scatter_plots") 
-            os.makedirs(gui_plots_dir, exist_ok=True)
-            safe_id = run_id_suffix.replace('/','_').replace('\\','_')[:50]
-            f_name = f"scatter_{ticker.replace('.','_').replace('^','')}_{safe_id}.png"; p_path = os.path.join(gui_plots_dir, f_name)
-            fig.savefig(p_path); plt.close(fig); logger.info(f"Scatter plot saved: {p_path}"); return p_path
-        except Exception as e: logger.error(f"Scatter plot error for {ticker}: {e}",exc_info=True); return None
-
-
-
-    def on_plot_ticker_selected(self, ticker: str): # Your previous robust version
-        if not ticker or not self.current_run_data or not self.plots_display_layout: return
-        logger.info(f"Displaying plots for: {ticker}")
-        self._clear_layout(self.plots_display_layout)
-        preds_df = self.current_run_data.get('predictions_df'); plot_map = self.current_run_data.get('plot_files', {})
-        if preds_df is not None and not preds_df.empty:
-            ticker_df = preds_df[preds_df['Ticker'] == ticker]
-            if not ticker_df.empty:
-                vp = self.plots_scroll_area.viewport(); max_w = vp.width() - 25 if vp else 600; max_w = max(max_w,100)
-                if ticker in plot_map and os.path.exists(plot_map[ticker]): # plot_map value is absolute path
-                    self.plots_display_layout.addWidget(QLabel(f"<b>Eval Plot: {ticker}</b>")); lbl=QLabel(); pxm=QPixmap(plot_map[ticker])
-                    if pxm.width()>max_w: pxm=pxm.scaledToWidth(max_w, Qt.TransformationMode.SmoothTransformation)
-                    lbl.setPixmap(pxm); self.plots_display_layout.addWidget(lbl)
-                else: self.plots_display_layout.addWidget(QLabel(f"Line plot for {ticker} not found: '{plot_map.get(ticker)}'"))
-                if 'ActualValue' in ticker_df.columns and 'PredictedReturn' in ticker_df.columns:
-                    scatter_df = ticker_df[['ActualValue', 'PredictedReturn']].dropna()
-                    if not scatter_df.empty:
-                        run_id = self.current_run_data.get('run_id', 'curr'); s_path = self._create_scatter_plot_image(scatter_df, ticker, run_id)
-                        if s_path and os.path.exists(s_path):
-                            self.plots_display_layout.addWidget(QLabel(f"<b>Scatter Plot: {ticker}</b>")); lbl_s=QLabel();pxm_s=QPixmap(s_path)
-                            if pxm_s.width()>max_w: pxm_s=pxm_s.scaledToWidth(max_w, Qt.TransformationMode.SmoothTransformation)
-                            lbl_s.setPixmap(pxm_s); self.plots_display_layout.addWidget(lbl_s)
-                        else: self.plots_display_layout.addWidget(QLabel(f"Scatter plot for {ticker} missing."))
-            else: self.plots_display_layout.addWidget(QLabel(f"No data for ticker {ticker}."))
-        if self.plots_display_layout: self.plots_display_layout.addStretch(1)
-
-
-
-
-# In class BacktestDashboard(QMainWindow):
-
-    def populate_run_selector(self):
-        logger.debug("Populating run selector for completed runs...")
-        self.run_selector.blockSignals(True) # Block signals during modification
-        
-        previous_selection = self.run_selector.currentText() # Store what was selected
-        self.run_selector.clear()
-        
-        runs = get_list_of_backtest_runs() # Get fresh list of runs
-        
-        newly_selected_run_id_after_populate: Optional[str] = None
-
-        if runs:
-            self.run_selector.addItems(runs)
-            # Try to re-select the previously selected run if it still exists
-            if previous_selection and previous_selection in runs:
-                self.run_selector.setCurrentText(previous_selection)
-                newly_selected_run_id_after_populate = previous_selection
-            else: # Otherwise, select the first (newest) run
-                self.run_selector.setCurrentIndex(0)
-                newly_selected_run_id_after_populate = self.run_selector.currentText()
-            logger.info(f"Run selector populated. Current selection: {newly_selected_run_id_after_populate}")
+        PREDICTIVE_STRATEGIES = get_predictive_strategies()
+        if strategy_name in PREDICTIVE_STRATEGIES:
+            self.feature_engineering_strategy_selector.setEnabled(True)
+            self.feature_engineering_strategy_selector.setStyleSheet("")
+            if hasattr(self, 'feature_strategy_label'):
+                self.feature_strategy_label.setText("Feature Strategy (Required for Predictive)")
+                self.feature_strategy_label.setStyleSheet("color: #2E7D32; font-weight: bold;")
         else:
-            self.clear_results_display() 
-            # Ensure metrics_layout exists before adding a widget
-            if self.metrics_layout:
-                self._clear_layout(self.metrics_layout) # Clear previous "No runs" message if any
-                self.metrics_layout.addWidget(QLabel("No completed backtest runs found."))
-            logger.info("No completed backtest runs found to populate selector.")
-            
-        self.run_selector.blockSignals(False)
+            self.feature_engineering_strategy_selector.setEnabled(False)
+            self.feature_engineering_strategy_selector.setStyleSheet("color: gray; background-color: #f0f0f0;")
+            self.feature_engineering_strategy_selector.setCurrentText("")
+            if hasattr(self, 'feature_strategy_label'):
+                self.feature_strategy_label.setText("Feature Strategy (Not needed for Historic)")
+                self.feature_strategy_label.setStyleSheet("color: gray;")
         
-        # Explicitly trigger data loading for the current selection
-        # This ensures that even if setCurrentText didn't trigger currentTextChanged
-        # (e.g., if the text was the same), the data is loaded or re-evaluated.
-        if newly_selected_run_id_after_populate:
-            # Check if we need to force a reload or if the data is already current
-            if not self.current_run_data or self.current_run_data.get('run_id') != newly_selected_run_id_after_populate:
-                self.on_run_selected(newly_selected_run_id_after_populate) # This will call load and display
-            else:
-                logger.debug(f"Data for run '{newly_selected_run_id_after_populate}' seems to be already loaded. No explicit reload.")
-        elif not runs: # If selector is empty after populating
-            self.clear_results_display()
-            if self.metrics_layout: # Check again for safety
-                self._clear_layout(self.metrics_layout)
-                self.metrics_layout.addWidget(QLabel("No completed backtest runs found."))
+        logger.info(f"Updated parameter visibility for strategy: {strategy_name}")
 
 
-    def closeEvent(self, event): # Same as before
-        logger.info("Close event for dashboard. Stopping active processes.")
-        if self.backtest_thread and self.backtest_thread.isRunning():
-            self.backtest_thread.stop_process()
-            self.backtest_thread.quit()
-            if not self.backtest_thread.wait(3000):
-                logger.warning("Backtest thread did not finish cleanly during GUI close.")
-        super().closeEvent(event)
+
+
 
 
 if __name__ == '__main__':

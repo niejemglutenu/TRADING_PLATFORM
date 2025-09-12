@@ -1,0 +1,3 @@
+"""
+Trading Platform Application Package
+"""

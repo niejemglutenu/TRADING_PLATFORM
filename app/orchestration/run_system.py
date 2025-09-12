@@ -2,439 +2,471 @@
 import logging
 import os
 import json
-from typing import Dict, List, Optional, Any
-import datetime
+from typing import Dict, List, Optional, Any, Type
+from datetime import timedelta, datetime, timezone
 import pandas as pd
 import time
-# --- Imports from within the app package ---
-from app.common.config import AppConfig # Corrected: Use the AppConfig class
+from app.common.config import AppConfig
 from app.common.constants import (
-    DEFAULT_PREDICT_DAYS, MIN_DAYS_FOR_PREDICTION_CONTEXT,
-    DEFAULT_OHLCV_TABLE_NAME, FEATURE_RETURNS # Add other necessary constants
+    get_models_dir, get_raw_predictions_filepath, get_merged_eval_filepath,
+    get_metrics_filepath, get_predictive_strategies, get_historic_strategies, 
+    is_predictive_strategy, is_historic_strategy
 )
-from app.data_ingestion.db_manager import DataManager, update_all_market_data
-from app.feature_engineering.strategies import FeatureEngineeringStrategy # Import base
-# Import specific strategies - this can be made more dynamic by loading based on feature_strategy_key
-from app.feature_engineering.strategies import PastReturnsStrategy
-from app.feature_engineering.strategies import ReturnsVariationStrategy, ReturnsVarCorrStrategy
-from app.modeling.training_pipeline import train_model_pipeline # Corrected path
-from app.modeling.prediction_pipeline import prediction_pipeline # Corrected path
-from app.backtesting.performance import evaluate_predictions # Corrected import based on your performance.py location
+from app.data_ingestion.db_manager import DataManager
+from app.feature_engineering.strategies import FeatureEngineeringStrategy
+from app.modeling.training_pipeline import train_model_pipeline
+from app.modeling.prediction_pipeline import prediction_pipeline
+from app.backtesting.performance import evaluate_and_backtest
+from app.backtesting.backtest import (
+    MarkowitzHistoric, 
+    MarkowitzPredicted,
+    EnhancedMarkowitzPredicted, 
+    MarkowitzHistoricEfficientReturn, 
+    MinSemiVarianceHistoric, 
+    MeanCVaRHistoric,
+    TopKPredicted,
+    MinSemiVariancePredicted,
+    MinCVaRPredicted,
+    PredictiveMomentumFilter
+)
+import hashlib
+import re
+import sys
+
+
 
 logger = logging.getLogger("app.orchestration.run_system")
-
-# REMOVED: global db_connection_pool_global_for_fetch_cache
-
-# trading_platform/app/orchestration/run_system.py
-import logging
-import os
-import json
-from typing import Dict, List, Optional, Any
-import datetime
-import pandas as pd
-
-# --- Imports from within the app package ---
-from app.common.config import AppConfig # Use the AppConfig class
-from app.common.constants import (
-    DEFAULT_PREDICT_DAYS, MIN_DAYS_FOR_PREDICTION_CONTEXT,
-    DEFAULT_OHLCV_TABLE_NAME, FEATURE_RETURNS # Add other necessary constants
-)
-
-logger = logging.getLogger("app.orchestration.run_system")
-
-
 STATUS_UPDATE_PREFIX = "GUI_STATUS_UPDATE::"
 
-def _emit_status_for_gui(status_dict: Dict[str, Any], status_file_path: str):
-    """Helper to write status JSON to file for GUI to parse."""
-    try:
-        # Also print to stdout for easier debugging if GUI is not attached or for other consumers
-        print(f"{STATUS_UPDATE_PREFIX}{json.dumps(status_dict)}", flush=True)
-        # Write to file
-        with open(status_file_path, 'w') as f_status:
-            json.dump(status_dict, f_status, indent=2)
-    except Exception as e:
-        logger.warning(f"Could not emit/write status for GUI: {e}")
+def setup_logging(level=logging.INFO):
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+    
+    if not root_logger.hasHandlers():
+        handler = logging.StreamHandler(sys.stdout)
+        formatter = logging.Formatter(
+            fmt="%(asctime)s | %(name)s | %(levelname)s: %(message)s",
+            datefmt="%H:%M:%S"
+        )
+        handler.setFormatter(formatter)
+        root_logger.addHandler(handler)
+
+def _emit_status_for_gui(status_data: Dict[str, Any]):
+    if "progress_percent" not in status_data:
+        total = status_data.get("total_iterations_approx", 1)
+        current = status_data.get("current_iteration", 0)
+        status_data["progress_percent"] = min(100, int((current / total) * 100)) if total > 0 else 0
+    print(f"{STATUS_UPDATE_PREFIX}{json.dumps(status_data, default=str)}")
 
 
 
-def run_system(
-    project_root_path: str,
-    mode: str,
-    model_scope: str,
-    tickers_to_predict: List[str],
-    feature_strategy_key: str,
-    feature_config_dict: Dict[str, Any], # Specific config for the chosen strategy
-    training_pool_start_date: str,
+def _generate_model_identifier(
+    feature_strategy_name: str,
+    model_name: str, 
+    num_stocks: int,
     prediction_horizon: int,
-    force_retrain_models: bool,
-    backtest_start_date: Optional[str] = None,
-    backtest_end_date: Optional[str] = None,
-    force_retrain_each_step: Optional[bool] = False,
-) -> Optional[Dict[str, Any]]:
-
-    logger.info(f"--- System Run Initializing: Mode='{mode}', ModelScope='{model_scope}', Strategy='{feature_strategy_key}' ---")
+    train_start_date_str: str,
+    train_end_date_str: str,
+    custom_tag: Optional[str] = None
+) -> str:
+ 
     
-    # --- Get Configs (unchanged from your version, looks good) ---
-    db_settings = AppConfig.get('database_settings', {})
-    api_settings = AppConfig.get('api_settings', {})
-    data_settings_cfg = AppConfig.get('data_settings', {})
-    storage_params = AppConfig.get('storage', {})
-
-    paths = {
-        "models": os.path.join(project_root_path, storage_params.get('model_artifact_path', 'data/models/')),
-        "predictions": os.path.join(project_root_path, storage_params.get('local_predictions_path', 'data/predictions/')),
-        "plots": os.path.join(project_root_path, storage_params.get('local_plots_path', 'data/plots/')),
-        "metrics": os.path.join(project_root_path, storage_params.get('local_metrics_path', 'data/metrics/')),
-        "status": os.path.join(project_root_path, storage_params.get('local_status_path', 'data/status/'))
-    }
-    try:
-        for path_name, path_val in paths.items(): 
-            os.makedirs(path_val, exist_ok=True)
-            logger.debug(f"Ensured directory exists: {path_name} at {path_val}")
-    except OSError as e:
-        logger.error(f"Dir creation failed: {e}. Aborting."); return {"error": f"Dir creation failed: {e}"}
+    safe_fe_name = re.sub(r'[^a-zA-Z0-9_-]+', '', feature_strategy_name)
+    safe_start_date = train_start_date_str.replace('-', '')
+    safe_end_date = train_end_date_str.replace('-', '')
     
-    data_manager_instance: Optional[DataManager] = None
-    ohlcv_table_name = data_settings_cfg.get('ohlcv_table_name', DEFAULT_OHLCV_TABLE_NAME)
+    parts = [
+        safe_fe_name,
+        model_name,
+        f"{num_stocks}stocks",
+        f"h{prediction_horizon}", # Use 'h' for horizon
+        f"{safe_start_date}-to-{safe_end_date}"
+    ]
 
-    if not db_settings or not db_settings.get("host"):
-        logger.error("DB settings missing. Aborting."); return {"error": "Missing DB settings"}
-    try:
-        data_manager_instance = DataManager(db_settings, api_settings, ohlcv_table_name)
-        if not (hasattr(data_manager_instance, 'conn_pool') and data_manager_instance.conn_pool):
-            raise ConnectionError("DataManager pool not valid post-init.")
-        logger.info("DataManager initialized.")
-    except Exception as e:
-        logger.error(f"DataManager init failed: {e}. Aborting.", exc_info=True)
-        return {"error": f"DataManager init error: {e}"}
+    if custom_tag:
+        safe_custom_tag = re.sub(r'[\s\W]+', '_', custom_tag).strip('_')
+        if safe_custom_tag:
+            parts.append(safe_custom_tag)
 
-    # --- Data Update (unchanged from your version, looks good) ---
-    # ... (symbols_to_update calculation and update_all_market_data call) ...
-    primary_index_ticker = data_settings_cfg.get('primary_index_ticker')
-    stocks_all_cfg = AppConfig.get('data_settings.STOCKS_ALL', [])
-    universe_for_training = stocks_all_cfg
-    default_ingest_start = data_settings_cfg.get('default_ingestion_start_date', '2018-01-01')
-    timeframe = data_settings_cfg.get('default_timeframe', '1Day')
-    symbols_to_update = list(set((universe_for_training or []) + (tickers_to_predict or []) + ([primary_index_ticker] if primary_index_ticker else [])))
-    symbols_to_update = [s for s in symbols_to_update if s]
-    if data_manager_instance and symbols_to_update:
-        update_start = training_pool_start_date
-        update_end = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-        update_mode_cfg = AppConfig.get('data_settings.data_update_mode', "update")
-        skip_api_cfg = AppConfig.get('data_settings.skip_api_for_update_globally', False)
-        if mode == "backtest" and backtest_end_date:
-            update_end = pd.to_datetime(backtest_end_date, utc=True).strftime("%Y-%m-%d")
-            if not AppConfig.get('backtest_settings.use_api_for_data_fetch_in_backtest', True):
-                skip_api_cfg = True
-                update_mode_cfg = AppConfig.get('backtest_settings.data_mode_if_no_api', "ensure_table_only")
-        try:
-            if not update_all_market_data(symbols_to_update, db_settings, api_settings, ohlcv_table_name, timeframe,update_mode_cfg, update_start, update_end, default_ingest_start, skip_api_cfg) and update_mode_cfg not in ["ensure_table_only", "skip_api"]:
-                logger.warning("Data update reported issues.")
-            else: logger.info("Data update/check complete.")
-        except Exception as e_data:
-            logger.error(f"Data update failed: {e_data}", exc_info=True)
-            if data_manager_instance: data_manager_instance.close_all_connections(); return {"error": f"Data update error: {e_data}"}
+    return "__".join(parts)
 
-    # --- Feature Engineering Strategy (unchanged from your version, looks good) ---
-    fe_instance: Optional[FeatureEngineeringStrategy] = None
-    if 'lstm_window_size' not in feature_config_dict:
-        feature_config_dict['lstm_window_size'] = AppConfig.get('model_settings.default_lstm_window_size', 10)
-    strategy_classes = {"PastReturnsStrategy": PastReturnsStrategy, "ReturnsVariationStrategy": ReturnsVariationStrategy, "ReturnsVarCorrStrategy": ReturnsVarCorrStrategy}
-    StrategyClass = strategy_classes.get(feature_strategy_key)
-    if not StrategyClass:
-        logger.error(f"Unknown strategy key: '{feature_strategy_key}'. Aborting.");
-        if data_manager_instance: data_manager_instance.close_all_connections(); return {"error": f"Unknown strategy key: {feature_strategy_key}"}
-    try:
-        if StrategyClass is None:
-            raise ValueError(f"StrategyClass for key '{feature_strategy_key}' is None.")
-        fe_instance = StrategyClass(config=feature_config_dict)
+
+class ETAEstimator:
+    """A helper class to manage and calculate the estimated time remaining."""
+    def __init__(self):
+        self.time_for_train_step: Optional[float] = None
+        self.predict_step_times: List[float] = []
+
+    def record_duration(self, duration: float, is_train_step: bool):
+        if is_train_step:
+            self.time_for_train_step = duration
+        else:
+            self.predict_step_times.append(duration)
+            if len(self.predict_step_times) > 5:
+                self.predict_step_times.pop(0)
+
+    def get_eta_str(self, remaining_steps: int, num_future_trains: int) -> Optional[str]:
+        if remaining_steps <= 0: return None
+        avg_predict_time = sum(self.predict_step_times) / len(self.predict_step_times) if self.predict_step_times else None
+        if not self.time_for_train_step and not avg_predict_time: return None
+        est_train_time = self.time_for_train_step or (avg_predict_time * 10.0)
+        est_predict_time = avg_predict_time or (self.time_for_train_step / 10.0)
+        num_future_predicts = remaining_steps - num_future_trains
+        eta_seconds = (num_future_trains * est_train_time) + (num_future_predicts * est_predict_time)
+        return str(timedelta(seconds=int(eta_seconds)))
+
+
+def _generate_backtest_predictions(
+    run_id: str,
+    fe_instance: FeatureEngineeringStrategy,
+    data_manager: DataManager,
+    config: Dict,
+    cli_args: Dict
+) -> List[pd.DataFrame]:
+  
+    backtest_start_date = cli_args['backtest_start_date']
+    backtest_end_date = cli_args['backtest_end_date']
+    tickers_to_predict = cli_args['tickers_to_predict']
+    model_scope = cli_args['model_scope']
+    prediction_horizon = cli_args['prediction_horizon']
+    training_pool_start_date = cli_args['training_pool_start_date']
+    load_model_id = cli_args.get('load_model_id')
+    save_model_as_tag = cli_args.get('save_model_as')
+    force_retrain_initial = cli_args.get('force_retrain', False)
+    force_retrain_each_step = cli_args.get('force_retrain_steps', False)
+    retrain_frequency = int(cli_args.get('retrain_frequency', 0))
+    model_name = cli_args.get('model', 'LSTM_Shuffle') # THE FIX: Correct dict access
+    epochs = cli_args.get('epochs', 50)
+    batch_size = cli_args.get('batch_size', 32)
+
+    data_settings_cfg = config['data_settings']
+    ohlcv_table_name = data_settings_cfg['ohlcv_table_name']
+    train_tickers_list = data_settings_cfg.get('STOCKS_ALL', []) if model_scope == "all_stocks_model" else tickers_to_predict
+    index_ticker_for_pipelines = data_settings_cfg.get('primary_index_ticker') if fe_instance.requires_index_data() else None
+    min_hist_context_for_pred = config.get('model_settings', {}).get('min_days_prediction_context', 100)
+
+    prediction_dates = pd.bdate_range(start=backtest_start_date, end=backtest_end_date, tz='UTC')
+    all_preds_dfs: List[pd.DataFrame] = []
+    days_since_last_train = 0
+    current_model_path = None
     
-        logger.info(f"Using Strategy: {fe_instance.__class__.__name__}, Config: {feature_config_dict}")
-    
-    
-    except Exception as e_fe: # Catch error during FE instantiation         
-        logger.error(f"Failed to instantiate strategy '{feature_strategy_key}': {e_fe}", exc_info=True)
-        if data_manager_instance: data_manager_instance.close_all_connections(); return {"error": f"Strategy init error: {e_fe}"}
-    
-    if fe_instance is None: # Should have been caught by StrategyClass check
-        logger.error("Critical: Feature engineering instance is None after instantiation attempt.")
-        if data_manager_instance: data_manager_instance.close_all_connections()
-        return {"error": "Feature engineering strategy instance None"}   
-    index_ticker_for_pipelines = primary_index_ticker if fe_instance.requires_index_data() else None
 
-    if fe_instance.requires_index_data() and not index_ticker_for_pipelines:
-        logger.warning(f"Strategy {fe_instance.__class__.__name__} requires index data, but 'primary_index_ticker' is not configured or primary_index_ticker is None. Correlation-like features might be all NaN.")
+    iteration_times: List[float] = []
 
-    # --- Model Scope & Training Tickers (unchanged, looks good) ---
-    train_tickers_list: List[str]; model_id_base: str
-    if model_scope == "all_stocks_model":
-        train_tickers_list = universe_for_training
-        if not train_tickers_list: 
-            logger.error("Training universe empty. Aborting.")
 
-            if data_manager_instance: data_manager_instance.close_all_connections(); return {"error": "Empty training universe"}
-        model_id_base = "all_stocks"
-    elif model_scope == "single_stock_model":
-        if not tickers_to_predict: 
-            logger.error("Tickers to predict empty. Aborting.")
-            if data_manager_instance: data_manager_instance.close_all_connections(); return {"error": "Empty tickers_to_predict"}
-        train_tickers_list = [tickers_to_predict[0]]
-        model_id_base = f"single_{train_tickers_list[0].replace('.', '_').replace('^', '')}"
-    else: 
-        logger.error(f"Invalid model_scope: {model_scope}. Aborting.")
-        if data_manager_instance: data_manager_instance.close_all_connections(); return {"error": f"Invalid model_scope"}
 
-    min_hist_context_for_pred = AppConfig.get('model_settings.min_days_prediction_context', MIN_DAYS_FOR_PREDICTION_CONTEXT)
-    
-    run_artifacts: Dict[str, Any] = {
-        "run_start_time": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "mode": mode, "model_scope": model_scope, "strategy": feature_strategy_key,
-        "tickers_predicted_for": tickers_to_predict,
-        "training_pool_start_date": training_pool_start_date,
-        "prediction_horizon": prediction_horizon,
-    }
-    if mode == "backtest":
-        run_artifacts.update({"backtest_start_date": backtest_start_date, "backtest_end_date": backtest_end_date})
+    if load_model_id := cli_args.get('load_model_id'):
+        logger.info(f"Using single pre-trained model for all predictions: {load_model_id}")
+        current_model_path = str(get_models_dir() / load_model_id)
+        if not os.path.isdir(current_model_path):
+            raise FileNotFoundError(f"Specified model to load not found: {current_model_path}")
 
-    status_file_path = os.path.join(paths["status"], "current_backtest_status.json")
+    for i, current_decision_date in enumerate(prediction_dates, 1):
+        iter_start_time = time.monotonic()
+        train_end_date = current_decision_date - pd.offsets.BDay(1)
+        
+        status_data = {
+            "run_id_for_gui": run_id,
+            "current_iteration": i,
+            "total_iterations_approx": len(prediction_dates)
+        }        
+        should_train_this_step = False
+        if not load_model_id:
+            if i == 1 or cli_args.get('force_retrain_steps', False) or (int(cli_args.get('retrain_frequency', 0)) > 0 and days_since_last_train >= int(cli_args.get('retrain_frequency', 0))):
+                should_train_this_step = True
+                
 
-    # --- Main Logic (Backtest or Live) ---
-    try:
-        if mode == "backtest":
-            if not (backtest_start_date and backtest_end_date):
-                raise ValueError("Backtest start and end dates are required for backtest mode.")
-            
-            bt_start_dt = pd.to_datetime(backtest_start_date, utc=True)
-            bt_end_dt = pd.to_datetime(backtest_end_date, utc=True)
+        
 
-            # Generate actual business dates for iteration
-            prediction_dates_for_backtest = pd.bdate_range(
-                start=bt_start_dt, end=bt_end_dt, 
-                tz=bt_start_dt.tz if hasattr(bt_start_dt, 'tz') else 'UTC' # Ensure tz
+        
+        if should_train_this_step:
+            status_data["status_message"] = f"Iter {i}: Training..."
+            _emit_status_for_gui(status_data)
+
+            model_identifier = _generate_model_identifier(
+                feature_strategy_name=fe_instance.__class__.__name__,
+                model_name=model_name, 
+                num_stocks=len(train_tickers_list),
+                prediction_horizon=prediction_horizon,
+                train_start_date_str=training_pool_start_date,
+                train_end_date_str=train_end_date.strftime('%Y-%m-%d'),
+                custom_tag=save_model_as_tag
             )
-            total_b_days_in_period = len(prediction_dates_for_backtest)
-
-            if total_b_days_in_period <= 0:
-                msg = f"No business days in specified backtest period: {bt_start_dt.date()} to {bt_end_dt.date()}."
-                logger.error(msg)
-                if data_manager_instance: data_manager_instance.close_all_connections()
-                return {"error": msg, **run_artifacts} # Include run_artifacts
-            logger.info(f"Backtest from {prediction_dates_for_backtest[0].date()} to {prediction_dates_for_backtest[-1].date()} ({total_b_days_in_period} iterations), Horizon: {prediction_horizon} days")
-
-            overall_backtest_start_time_monotonic = time.monotonic()
-            time_per_iteration_ema_sec: Optional[float] = None
-            ema_alpha = 0.2 # Smoothing factor for EMA
-
-            current_run_id_for_gui = f"bt_{model_id_base}_{fe_instance.__class__.__name__}_{prediction_dates_for_backtest[0].strftime('%Y%m%d')}_{prediction_dates_for_backtest[-1].strftime('%Y%m%d')}"
             
-            # Initial status emit
-            initial_status = {
-                "run_id_for_gui": current_run_id_for_gui, "current_iteration": 0,
-                "total_iterations_approx": total_b_days_in_period, "progress_percent": 0,
-                "status_message": "Backtest initializing...", "estimated_time_remaining_str": "Calculating...",
-                "overall_start_time_unix": overall_backtest_start_time_monotonic, # For GUI to calc elapsed
-                "time_per_iteration_sec": None, "is_final_run_status": False
-            }
-            _emit_status_for_gui(initial_status, status_file_path)
+            model_base_path = str(get_models_dir() / run_id) if force_retrain_each_step else str(get_models_dir())
 
-            all_bt_preds_dfs: List[pd.DataFrame] = []
+            trained_path = train_model_pipeline(
+                tickers_for_training=train_tickers_list,
+                index_ticker_symbol=index_ticker_for_pipelines,
+                training_data_start_date_str=training_pool_start_date,
+                training_data_end_date_str=train_end_date.strftime('%Y-%m-%d'),
+                model_identifier_str=model_identifier,
+                feature_engineer=fe_instance,
+                data_manager=data_manager,
+                ohlcv_table_name=ohlcv_table_name,
+                force_retrain=force_retrain_initial or should_train_this_step,
+                model_artifacts_base_path=model_base_path,
+                model=model_name,
+                epochs=epochs,
+                batch_size=batch_size,
+                prediction_horizon=prediction_horizon
+            )
             
-            for actual_iterations_completed, curr_pred_target_dt in enumerate(prediction_dates_for_backtest, 1):
-                iter_start_time_monotonic = time.monotonic()
-                train_ends_dt = curr_pred_target_dt - pd.offsets.BDay(1)
-                train_ends_str = train_ends_dt.strftime('%Y-%m-%d')
+            if not trained_path:
+                raise RuntimeError(f"Model training failed for iteration {i}.")
+            
+            current_model_path = trained_path
+            
+            days_since_last_train = 0
+        else:
+            days_since_last_train += 1
+
+        if not current_model_path:
+            raise RuntimeError("No model is available for prediction. Check training/loading logic.")
+
+        status_data["status_message"] = f"Iter {i}: Predicting..."
+        _emit_status_for_gui(status_data)
+
+        logger.info(f"Iteration {i}: Generating predictions for {len(cli_args['tickers_to_predict'])} tickers")
+        predictions_generated = 0
+
+        for ticker in cli_args['tickers_to_predict']:
+            pred_hist_start = (train_end_date - pd.Timedelta(days=min_hist_context_for_pred)).strftime('%Y-%m-%d')
+            
+            try:
+                logger.info(f"Generating prediction for {ticker} using data from {pred_hist_start} to {train_end_date.strftime('%Y-%m-%d')}")
                 
-                
-                status_data_iter = initial_status.copy() # Base for this iteration
-                status_data_iter["current_iteration"] = actual_iterations_completed
-
-                status_data_iter["status_message"] = f"Iter {actual_iterations_completed}/{total_b_days_in_period}: Training (model for {train_ends_str})"
-                if total_b_days_in_period > 0:
-                    status_data_iter["progress_percent"] = min(100, int((actual_iterations_completed / total_b_days_in_period) * 100))
-
-
-                if time_per_iteration_ema_sec and actual_iterations_completed > 1: # Can estimate after first iter done
-                    remaining_iter = total_b_days_in_period - actual_iterations_completed
-                    if remaining_iter >= 0:
-                        eta_sec = remaining_iter * time_per_iteration_ema_sec
-                        status_data_iter["estimated_time_remaining_str"] = str(datetime.timedelta(seconds=int(eta_sec)))
-                    else: status_data_iter["estimated_time_remaining_str"] = "Finishing..." # Should not happen if loop logic is right
-                elif actual_iterations_completed == 1: # For the first iteration, before EMA is known
-                     status_data_iter["estimated_time_remaining_str"] = "Calculating (1st iter)..."
-                _emit_status_for_gui(status_data_iter, status_file_path)
-                
-                logger.info(f"BT Iter {actual_iterations_completed}: Train to {train_ends_str}, Pred for {curr_pred_target_dt.date()}")
-                model_file_id = f"bt_{model_id_base}_{fe_instance.__class__.__name__}_{train_ends_str.replace('-','')}"
-                retrain_now = force_retrain_models if actual_iterations_completed == 1 else (force_retrain_each_step or False)
-
-                m_path, x_path, y_path = train_model_pipeline(
-                    train_tickers_list, index_ticker_for_pipelines, training_pool_start_date,
-                    train_ends_str, model_file_id, fe_instance, data_manager_instance,
-                    ohlcv_table_name, retrain_now, paths["models"]
+                preds_df, _ = prediction_pipeline(
+                    ticker_to_predict=ticker,
+                    index_ticker_symbol=index_ticker_for_pipelines,
+                    historical_data_fetch_start_date_str=pred_hist_start, # USE THE CORRECTED START DATE
+                    historical_data_end_date_str=train_end_date.strftime('%Y-%m-%d'),
+                    n_days_to_predict=prediction_horizon,
+                    model_load_path=current_model_path,
+                    feature_engineer=fe_instance,
+                    data_manager=data_manager,
+                    ohlcv_table_name=ohlcv_table_name
                 )
-                if not all([m_path, x_path, y_path]):
-                    err_msg = f"BT Model prep failed iter {actual_iterations_completed}."
-                    logger.error(err_msg);
-                    _emit_status_for_gui({**status_data_iter, "status_message": f"ERROR: {err_msg}", "is_final_run_status": True}, status_file_path)
-                    if data_manager_instance: data_manager_instance.close_all_connections(); return {"error": err_msg, **run_artifacts}
-
-                status_data_iter["status_message"] = f"Iter {actual_iterations_completed}/{total_b_days_in_period}: Predicting ({len(tickers_to_predict)} tickers)"
-                _emit_status_for_gui(status_data_iter, status_file_path)
-
-                for ticker_lp in tickers_to_predict:
-                    pred_hist_start = (train_ends_dt - pd.Timedelta(days=min_hist_context_for_pred)).strftime('%Y-%m-%d')
-                    
-                    if m_path and x_path and y_path is not None:
-                        preds_df_iter, _ = prediction_pipeline(
-                            ticker_lp, index_ticker_for_pipelines, pred_hist_start, train_ends_str,
-                            prediction_horizon, m_path, x_path, y_path, fe_instance,
-                            data_manager_instance, ohlcv_table_name
-                        )
-                    if preds_df_iter is not None and not preds_df_iter.empty: all_bt_preds_dfs.append(preds_df_iter)
                 
-                iter_end_time_monotonic = time.monotonic()
-                current_iter_duration = iter_end_time_monotonic - iter_start_time_monotonic
-                if time_per_iteration_ema_sec is None: time_per_iteration_ema_sec = current_iter_duration
-                else: time_per_iteration_ema_sec = (ema_alpha * current_iter_duration) + ((1 - ema_alpha) * time_per_iteration_ema_sec)
-                
-                logger.info(f"BT Iter {actual_iterations_completed} took {current_iter_duration:.2f}s. EMA iter time: {time_per_iteration_ema_sec:.2f}s")
-                status_data_iter["time_per_iteration_sec"] = time_per_iteration_ema_sec
-                status_data_iter["status_message"] = f"Iter {actual_iterations_completed}/{total_b_days_in_period}: Completed."
-                remaining_iter_after = total_b_days_in_period - actual_iterations_completed
-                if remaining_iter_after > 0 and time_per_iteration_ema_sec:
-                    eta_sec_after = remaining_iter_after * time_per_iteration_ema_sec
-                    status_data_iter["estimated_time_remaining_str"] = str(datetime.timedelta(seconds=int(eta_sec_after)))
+                if preds_df is not None and not preds_df.empty:
+                    all_preds_dfs.append(preds_df)
+                    predictions_generated += 1
+                    logger.info(f"Successfully generated {len(preds_df)} predictions for {ticker}")
                 else:
-                    status_data_iter["estimated_time_remaining_str"] = "Completed"
-                    if remaining_iter_after <= 0: # This was the last iteration or overshot
-                        status_data_iter["is_final_run_status"] = True
-                        status_data_iter["progress_percent"] = 100
-                _emit_status_for_gui(status_data_iter, status_file_path)
+                    logger.warning(f"No predictions generated for {ticker} - likely missing historical data")
+                    
+            except Exception as e:
+                logger.warning(f"Failed to generate predictions for {ticker}: {e}")
+                continue
+        
+        logger.info(f"Iteration {i}: Generated predictions for {predictions_generated}/{len(cli_args['tickers_to_predict'])} tickers")
+        
+        
+        # --- Final Status Update Block ---
+        iter_duration = time.monotonic() - iter_start_time
+        if i <= 2:
+            iteration_times.append(iter_duration)
+        
+        status_data = {
+            "run_id_for_gui": run_id,
+            "current_iteration": i,
+            "total_iterations_approx": len(prediction_dates),
+            "status_message": f"Iter {i}: Completed"
+        }
+        
+        if i == 1:
+            status_data['time_for_first_iter'] = iteration_times[0]
+        elif i == 2:
+            status_data['time_for_first_iter'] = iteration_times[0]
+            status_data['time_for_second_iter'] = iteration_times[1]
+
+
+
+        status_data['days_since_last_train'] = days_since_last_train
+        status_data["status_message"] = f"Iter {i}: Completed."
+
+        _emit_status_for_gui(status_data)
+
+    return all_preds_dfs
+def _run_backtest_mode(
+    run_id: str,
+    data_manager: DataManager,
+    fe_instance: Optional[FeatureEngineeringStrategy],
+    config: Dict,
+    cli_args: Dict
+) -> Dict:
+
+    PREDICTIVE_STRATEGIES = get_predictive_strategies()
+    HISTORIC_STRATEGIES = get_historic_strategies()
+
+    logger.info(f"--- Running Backtest Mode ---")
+    
+    run_artifacts = {}
+    final_preds_df = pd.DataFrame()
+    portfolio_strategy_key = cli_args['portfolio_strategy']
+
+    load_preds_run_id = cli_args.get('load_predictions_from_run')
+    if load_preds_run_id:
+        logger.info(f"Loading predictions from previous run: {load_preds_run_id}")
+        preds_filepath = get_raw_predictions_filepath(load_preds_run_id)
+        if preds_filepath.exists():
+            final_preds_df = pd.read_csv(preds_filepath)
+            logger.info(f"Unique tickers: {sorted(final_preds_df['Ticker'].unique())}")
+            logger.info(f"Null values: {final_preds_df.isnull().sum().to_dict()}")
+            run_artifacts['loaded_predictions_from_run'] = load_preds_run_id
+        else:
+            raise FileNotFoundError(f"Could not find prediction file: {preds_filepath}")
+    else:
+        if is_predictive_strategy(portfolio_strategy_key):
+            if fe_instance is None:
+                raise ValueError(f"Feature engineering strategy is required for predictive strategy '{portfolio_strategy_key}' but none was provided.")
+            logger.info("Portfolio strategy requires predictions. Starting prediction pipeline...")
+            all_preds_dfs = _generate_backtest_predictions(run_id, fe_instance, data_manager, config, cli_args)
+            if all_preds_dfs:
+                final_preds_df = pd.concat(all_preds_dfs, ignore_index=True)
+                preds_path = get_raw_predictions_filepath(run_id)
+                final_preds_df.to_csv(preds_path, index=False)
+                run_artifacts['raw_predictions_path'] = str(preds_path)
+                logger.info(f"New predictions saved: {preds_path}")
+            else:
+                logger.warning("No predictions were generated. This may cause issues with predictive strategies.")
+                final_preds_df = pd.DataFrame()
+        else:
+            logger.info(f"Portfolio strategy '{portfolio_strategy_key}' is historic. Skipping prediction generation.")
             
-            # --- After the loop ---
-            final_status_msg = "Backtest: Processing final results."
-            if not all_bt_preds_dfs: final_status_msg = "Backtest: Loop done, no predictions generated."
-            _emit_status_for_gui({
-                "run_id_for_gui": current_run_id_for_gui, "current_iteration": actual_iterations_completed,
-                "total_iterations_approx": total_b_days_in_period, "progress_percent": 100, 
-                "status_message": final_status_msg, "estimated_time_remaining_str": "Completed",
-                "overall_start_time_unix": overall_backtest_start_time_monotonic,
-                "time_per_iteration_sec": time_per_iteration_ema_sec, "is_final_run_status": True
-            }, status_file_path)
 
-            if all_bt_preds_dfs:
-                
-                file_suffix_safe = current_run_id_for_gui # Use the consistent run_id for filenames
-                final_preds_df = pd.concat(all_bt_preds_dfs, ignore_index=True)
-                # ... (datetime normalization for PredictionDate, ForecastOriginDate) ...
-                if 'PredictionDate' in final_preds_df.columns: final_preds_df['PredictionDate'] = pd.to_datetime(final_preds_df['PredictionDate'], errors='coerce', utc=True).dt.normalize()
-                if 'ForecastOriginDate' in final_preds_df.columns: final_preds_df['ForecastOriginDate'] = pd.to_datetime(final_preds_df['ForecastOriginDate'], errors='coerce', utc=True).dt.normalize()
+    if is_historic_strategy(portfolio_strategy_key):
+        try:
+            train_start = pd.to_datetime(cli_args['training_pool_start_date'])
+            backtest_start = pd.to_datetime(cli_args['backtest_start_date'])
+            lookback_period = len(pd.bdate_range(train_start, backtest_start, inclusive='left'))
+            logger.info(f"Dynamic lookback period calculated: {lookback_period} days (from {train_start} to {backtest_start})")
+        except (TypeError, ValueError) as e:
+            logger.error(f"Invalid dates for dynamic lookback: {e}. Falling back to default.")
+            lookback_period = 252
+    else:
+        lookback_period = int(cli_args.get('lookback_period', 252))
+    
+    logger.info(f"Using lookback period of {lookback_period} days for strategy {portfolio_strategy_key}.")
 
-                preds_csv_path = os.path.join(paths["predictions"], f"predictions_{file_suffix_safe}.csv")
-                relative_preds_path = os.path.relpath(preds_csv_path, os.path.join(project_root_path, "data"))
-                run_artifacts["predictions_csv_path"] = relative_preds_path # e.g., "predictions/predictions_XYZ.csv"
 
-                # For plots_output_directory
-                plots_output_dir_for_run = os.path.join(paths["plots"], file_suffix_safe)
-                os.makedirs(plots_output_dir_for_run, exist_ok=True)
-                relative_plots_dir = os.path.relpath(plots_output_dir_for_run, os.path.join(project_root_path, "data"))
-                run_artifacts["plots_output_directory"] = relative_plots_dir # e.g., "plots/run_XYZ"
+    strategy_map = {
+        'MarkowitzHistoric': MarkowitzHistoric,
+        'MarkowitzHistoricEfficientReturn': MarkowitzHistoricEfficientReturn,
+        'MinSemiVarianceHistoric': MinSemiVarianceHistoric,
+        'MeanCVaRHistoric': MeanCVaRHistoric,
+        'MarkowitzPredicted': MarkowitzPredicted,
+        'EnhancedMarkowitzPredicted': EnhancedMarkowitzPredicted,
+        'TopKPredicted': TopKPredicted,
+        'MinSemiVariancePredicted': MinSemiVariancePredicted,
+        'MinCVaRPredicted': MinCVaRPredicted,
+        'PredictiveMomentumFilter': PredictiveMomentumFilter,
 
-                # For plot_paths_dict
-                relative_plot_paths_dict = {}
-                plot_p_dict = None  # Initialize to avoid unbound error
-                # plot_p_dict will be set after evaluate_predictions below
-                run_artifacts["plot_paths_dict"] = relative_plot_paths_dict # e.g., {"AAPL": "plots/run_XYZ/plot_AAPL.png"}
-                final_preds_df.to_csv(preds_csv_path, index=False); run_artifacts["predictions_csv_path"] = preds_csv_path
-                logger.info(f"Backtest predictions saved: {preds_csv_path}")
+    } 
+    PortfolioStrategyClass = strategy_map.get(portfolio_strategy_key)
+    
 
-                plots_output_dir_for_run = os.path.join(paths["plots"], file_suffix_safe)
-                os.makedirs(plots_output_dir_for_run, exist_ok=True)
-                
-                evaluation_target_col_name = fe_instance.get_target_name()
-                eval_results = evaluate_predictions(
-                    final_preds_df, fe_instance, data_manager_instance, ohlcv_table_name,
-                    evaluation_target_col_name, plots_output_dir_for_run, f"_{file_suffix_safe}"
-                )
-                if eval_results: # Tuple: (merged_df, per_ticker_per_horizon, overall_per_horizon, plot_paths_dict)
-                    merged_eval_df, met_tick, met_ovr, plot_p_dict = eval_results
-                    if merged_eval_df is not None and not merged_eval_df.empty:
-                        merged_path = os.path.join(paths["predictions"], f"merged_eval_data_{file_suffix_safe}.csv")
-                        merged_eval_df.to_csv(merged_path, index=False); run_artifacts["evaluation_merged_dataframe_path"] = merged_path
-                    run_artifacts.update({"plot_paths_dict": plot_p_dict, "plots_output_directory": plots_output_dir_for_run})
-                    if met_ovr:
-                        path = os.path.join(paths["metrics"], f"metrics_overall_horizon_{file_suffix_safe}.json")
-                        with open(path, 'w') as f: json.dump(met_ovr, f, indent=4, default=str); run_artifacts["overall_horizon_metrics_path"] = path
-                    if met_tick:
-                        path = os.path.join(paths["metrics"], f"metrics_per_ticker_horizon_{file_suffix_safe}.json")
-                        with open(path, 'w') as f: json.dump(met_tick, f, indent=4, default=str); run_artifacts["per_ticker_horizon_metrics_path"] = path
-            else: logger.warning("No BT predictions generated to evaluate.")
 
+    logger.info("Assembling a complete dictionary of all strategy parameters from CLI arguments...")
+    
+    strategy_params = cli_args.copy()
+    
+    
+    strategy_params['predictions_df'] = final_preds_df
+    strategy_params['backtest_start'] = cli_args['backtest_start_date']
+    int_keys = ['rebalance_days', 'top_k', 'epochs', 'batch_size', 'prediction_horizon', 'lookback_period']
+    float_keys = ['max_position_size', 'min_position_size', 'entry_threshold', 'stop_loss_pct', 'take_profit_pct', 'trailing_stop_pct']
+    bool_keys = ['enable_stop_loss_take_profit', 'use_trailing_stop', 'allow_shorting', 'fully_invested']
+    date_keys = ['backtest_start']
+    
+    for key in int_keys:
+        if key in strategy_params and strategy_params[key] is not None:
+            strategy_params[key] = int(strategy_params[key])
+            
+    for key in float_keys:
+        if key in strategy_params and strategy_params[key] is not None:
+            strategy_params[key] = float(strategy_params[key])
+            
+    for key in bool_keys:
+        if key in strategy_params and strategy_params[key] is not None:
+            strategy_params[key] = bool(strategy_params[key])
+
+    for key in date_keys:
+        if key in strategy_params and strategy_params[key] is not None:
+            strategy_params[key] = str(strategy_params[key])
+
+    logger.info(f"Passing final strategy parameters to backtrader: {list(strategy_params.keys())}")
+    
+ 
+    merged_eval_df, overall_metrics = evaluate_and_backtest(
+        run_id=run_id,
+        predictions_df=final_preds_df,
+        data_manager=data_manager,
+        ohlcv_table_name=config['data_settings']['ohlcv_table_name'],
+        backtest_start_date=cli_args['backtest_start_date'],
+        backtest_end_date=cli_args['backtest_end_date'],
+        tickers_for_bt=cli_args['tickers_to_predict'],
+        portfolio_strategy_class=PortfolioStrategyClass,
+        portfolio_strategy_params=strategy_params)
+
+    if overall_metrics:
+        metrics_path = get_metrics_filepath(run_id)
+        with open(metrics_path, 'w') as f: json.dump(overall_metrics, f, indent=4, default=str)
+        run_artifacts["overall_metrics_path"] = str(metrics_path)
+        logger.info(f"Overall metrics saved to: {metrics_path}")
+
+    if merged_eval_df is not None and not merged_eval_df.empty:
+        merged_path = get_merged_eval_filepath(run_id)
+        merged_eval_df.to_csv(merged_path, index=False)
+        run_artifacts["evaluation_merged_dataframe_path"] = str(merged_path)
+        logger.info(f"Merged evaluation data saved to: {merged_path}")
+    return run_artifacts
+
+
+def run_system(**kwargs: Any) -> Optional[Dict[str, Any]]:
+
+    setup_logging(logging.INFO)
+
+    mode = kwargs.get('mode')
+    run_id = kwargs.get('run_id')
+    logger.info(f"--- System Run Initializing: Mode='{mode}', RunID='{run_id}' ---")
+
+
+    run_artifacts = {"run_id": run_id, "run_start_time": datetime.now(timezone.utc).isoformat(), "parameters": {k: v for k, v in kwargs.items() if k not in ['project_root_path']}}
+    data_manager_instance = None
+    try:
+        config = AppConfig.get_instance()
+        data_manager_instance = DataManager(config['database_settings'], config.get('api_settings', {}), config['data_settings']['ohlcv_table_name'])
+        
+        fe_instance = None
+        if kwargs.get('feature_strategy_key'):
+            fe_instance = FeatureEngineeringStrategy.create(kwargs['feature_strategy_key'], kwargs.get('feature_config_dict', {}))
+        
+        if mode == "backtest":
+            backtest_artifacts = _run_backtest_mode(run_id=run_id, data_manager=data_manager_instance, fe_instance=fe_instance, config=config, cli_args=kwargs)
+            run_artifacts.update(backtest_artifacts)
         elif mode == "live_predict":
-            live_train_ends_dt = pd.Timestamp.now(tz=datetime.timezone.utc).normalize() - pd.offsets.BDay(1)
-            live_train_ends_str = live_train_ends_dt.strftime('%Y-%m-%d')
-            model_id_live = f"live_{model_id_base}_{fe_instance.__class__.__name__}_{live_train_ends_str.replace('-','')}"
-            logger.info(f"Starting Live Predict: Train up to {live_train_ends_str}, Horizon: {prediction_horizon} days. Model ID: {model_id_live}")
-            
-            m_path, x_path, y_path = train_model_pipeline(
-                train_tickers_list, index_ticker_for_pipelines, training_pool_start_date,
-                live_train_ends_str, model_id_live, fe_instance, data_manager_instance,
-                ohlcv_table_name, force_retrain_models, paths["models"]
-            )
-            if not all([m_path, x_path, y_path]):
-                raise RuntimeError(f"Live model prep failed for {model_id_live}.")
-
-            all_live_preds_dfs: List[pd.DataFrame] = []
-            for ticker_lp in tickers_to_predict:
-                live_hist_start = (live_train_ends_dt - pd.Timedelta(days=min_hist_context_for_pred)).strftime('%Y-%m-%d')
-                
-                if m_path and x_path and y_path is not None:
-                    preds_df_live, _ = prediction_pipeline(
-                        ticker_lp, index_ticker_for_pipelines, live_hist_start, live_train_ends_str,
-                        prediction_horizon, m_path, x_path, y_path, fe_instance,
-                        data_manager_instance, ohlcv_table_name
-                    )
-                if preds_df_live is not None and not preds_df_live.empty:
-                    all_live_preds_dfs.append(preds_df_live)
-            
-            if all_live_preds_dfs:
-                final_live_df = pd.concat(all_live_preds_dfs, ignore_index=True)
-                if 'PredictionDate' in final_live_df.columns:
-                    final_live_df['PredictionDate'] = pd.to_datetime(final_live_df['PredictionDate'], errors='coerce', utc=True).dt.normalize()
-                
-                live_preds_path = os.path.join(paths["predictions"], f"predictions_{model_id_live}.csv")
-                final_live_df.to_csv(live_preds_path, index=False)
-                logger.info(f"Live predictions saved: {live_preds_path}")
-                run_artifacts["live_predictions_csv_path"] = live_preds_path
-                logger.info("Live prediction generated. Placeholder for trading engine.")
-            else: logger.warning("No live predictions generated.")
-
+            live_artifacts = _run_live_predict_mode(**kwargs)
+            run_artifacts.update(live_artifacts)
         else:
             raise ValueError(f"Invalid mode: '{mode}'.")
-
     except Exception as e_run_main:
         logger.critical(f"System Run FAILED: {e_run_main}", exc_info=True)
         run_artifacts["error"] = str(e_run_main)
-        # Attempt to emit a final error status for GUI
-        final_error_status_data = {
-            "run_id_for_gui": run_artifacts.get("run_id_for_gui", f"error_run_{datetime.datetime.now(datetime.timezone.utc).isoformat()}"),
-            "current_iteration": run_artifacts.get("current_iteration", 0), # Try to get last known iter
-            "total_iterations_approx": run_artifacts.get("total_iterations_approx", 0),
-            "progress_percent": 100, # Indicate process has ended (even if in error)
-            "status_message": f"ERROR: {str(e_run_main)[:250]}", # Truncate long errors
-            "estimated_time_remaining_str": "Error",
-            "overall_start_time_unix": run_artifacts.get("overall_start_time_unix"),
-            "time_per_iteration_sec": run_artifacts.get("time_per_iteration_sec"),
-            "is_final_run_status": True
-        }
-        _emit_status_for_gui(final_error_status_data, status_file_path)
+        _emit_status_for_gui({"run_id_for_gui": run_id or "error_run", "status_message": f"ERROR: {str(e_run_main)[:250]}", "is_final_run_status": True})
     finally:
         if data_manager_instance:
             data_manager_instance.close_all_connections()
             logger.info("DataManager connections closed.")
             
-    run_artifacts["run_end_time"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    logger.info(f"--- System Run Finished: Mode='{mode}', Scope='{model_scope}', Strategy='{feature_strategy_key}' ---")
-    if "error" in run_artifacts: logger.error(f"Run finished with error: {run_artifacts['error']}")
+    run_artifacts["run_end_time"] = datetime.now(timezone.utc).isoformat()
+    logger.info(f"--- System Run Finished ---")
     return run_artifacts
+
+
+
+def _run_live_predict_mode(**kwargs: Any) -> Dict:
+    # This is a placeholder for your future live trading logic
+    logger.info("Live prediction mode is not  implemented.")
+    return {"status": "Live prediction not implemented."}
+
