@@ -35,3 +35,5 @@ db.sqlite
 # VSCode or other IDEs
 .vscode/
 .idea/
+
+desktop_dashboard/SAVED/

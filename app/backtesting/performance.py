@@ -13,7 +13,6 @@ from app.common.constants import get_equity_curve_filepath
 
 logger = logging.getLogger("app.backtesting.performance")
 
-# --- BACKTESTING CORE ---
 
 def get_backtrader_analyzers() -> List[Tuple[Any, str]]:
     return [
@@ -371,26 +370,21 @@ def evaluate_and_backtest(
     bt_start_dt = pd.to_datetime(backtest_start_date, utc=True)
     bt_end_dt = pd.to_datetime(backtest_end_date, utc=True)
 
-    # --- Step 1: Prediction Evaluation (if applicable) ---
     is_predictive = issubclass(portfolio_strategy_class, PredictedPortfolioStrategy)
     if is_predictive and not predictions_df.empty:
         logger.info("Evaluating prediction accuracy...")
         unique_tickers = sorted(list(pd.unique(predictions_df['Ticker'])))
         
-        # Handle multi-day predictions
         has_multi_day_predictions = 'ForecastHorizon' in predictions_df.columns
         if has_multi_day_predictions:
-            # Use origin dates for fetching actual data
             min_pred_date = pd.to_datetime(predictions_df['ForecastOriginDate'], utc=True).min()
             max_pred_date = pd.to_datetime(predictions_df['PredictionDate'], utc=True).max()
             logger.info(f"Multi-day prediction date range: {min_pred_date.strftime('%Y-%m-%d')} to {max_pred_date.strftime('%Y-%m-%d')}")
         else:
-            # Single-day predictions
             min_pred_date = pd.to_datetime(predictions_df['PredictionDate'], utc=True).min()
             max_pred_date = pd.to_datetime(predictions_df['PredictionDate'], utc=True).max()
             logger.info(f"Single-day prediction date range: {min_pred_date.strftime('%Y-%m-%d')} to {max_pred_date.strftime('%Y-%m-%d')}")
         
-        # Check if prediction dates align with backtest period
         if min_pred_date > bt_start_dt:
             logger.warning(f"Predictions start ({min_pred_date.strftime('%Y-%m-%d')}) after backtest start ({bt_start_dt.strftime('%Y-%m-%d')})")
         if max_pred_date < bt_end_dt:
@@ -443,8 +437,6 @@ def evaluate_and_backtest(
     else:
         logger.info("Historic strategy or no predictions provided. Skipping prediction evaluation.")
 
-  # ========================= THE CORE FIX IS HERE =========================
-    # --- Step 2: Determine Correct Data Fetch Range with Explicit Logic ---
     
     fetch_from_date_str: str
     
@@ -455,13 +447,10 @@ def evaluate_and_backtest(
 
     logger.info(f"Historic strategy: fetching data from training start date {fetch_from_date_str}.")
 
-    # The end date is always the backtest end date, plus a small buffer for safety.
     fetch_to_date_str = (bt_end_dt + pd.Timedelta(days=5)).strftime('%Y-%m-%d')
-    # ======================================================================
 
     logger.info(f"Final data fetch range: {fetch_from_date_str} to {fetch_to_date_str}")
     
-    # --- Step 3: Fetch Data ---
     ohlcv_data_map = data_manager.get_data_from_db(
         tickers_for_bt, 
         fetch_from_date_str,
@@ -469,7 +458,6 @@ def evaluate_and_backtest(
         ohlcv_table_name
     )
 
-       # --- Step 4: Pre-process Predictions from merged_df and Add to Strategy Parameters ---
     
     if is_predictive:
         if not predictions_df.empty:
@@ -482,10 +470,8 @@ def evaluate_and_backtest(
             daily_predictions_dict = {}
             grouped = df.groupby('DecisionDate')
             for date, group in grouped:
-                # For each decision date, create a dictionary of {Ticker: PredictedReturn}
                 daily_predictions_dict[date] = dict(zip(group['Ticker'], group['PredictedReturn']))
 
-            # Add the READY-TO-USE dictionary to the strategy's parameters.
             portfolio_strategy_params['daily_predictions'] = daily_predictions_dict
             logger.info(f"Attached {len(daily_predictions_dict)} days of pre-processed predictions.")
         else:
@@ -506,7 +492,6 @@ def evaluate_and_backtest(
 
     overall_prediction_metrics, per_ticker_metrics = _calculate_prediction_metrics(merged_df)
 
-    # --- Step 6: Combine All Metrics ---
     overall_metrics = {
         "predictive_performance": overall_prediction_metrics,
         "portfolio_performance": backtest_metrics,

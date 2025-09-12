@@ -4,7 +4,6 @@ import logging
 import pandas as pd
 from pathlib import Path
 
-# Set matplotlib to a non-interactive backend, crucial for running in Docker
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -12,7 +11,6 @@ import matplotlib.pyplot as plt
 logger = logging.getLogger(__name__)
 
 def save_equity_curve_plot(df: pd.DataFrame, save_path: Path):
-    """Generates and saves the equity curve plot using matplotlib."""
     if df.empty:
         logger.warning(f"Equity curve DataFrame is empty. Skipping plot generation for {save_path}.")
         return

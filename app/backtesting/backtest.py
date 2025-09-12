@@ -18,10 +18,9 @@ warnings.filterwarnings('ignore', category=RuntimeWarning, module='scipy.optimiz
 logger = logging.getLogger("app.backtesting.backtest")
 for handler in logging.root.handlers:
     handler.setLevel(logging.DEBUG)
-# ==============================================================================
-#  BASE CLASS
-# ==============================================================================
 
+
+#  BASE CLASS
 
 class PortfolioStrategy(bt.Strategy):
     params = (
@@ -377,7 +376,6 @@ class RobustPredictedPortfolioStrategy(PredictedPortfolioStrategy):
 
 
 class MarkowitzHistoric(HistoricPortfolioStrategy):
-    """Optimizes for max Sharpe after screening for top performers."""
     def calculate_target_weights(self) -> dict:
         prices = self.get_historical_prices()
         if len(prices.columns) < 2: return {}
@@ -417,10 +415,7 @@ class MarkowitzHistoric(HistoricPortfolioStrategy):
             return self._smart_fallback_optimization(mu_filtered, S, tickers, "markowitz")
 
 class MarkowitzHistoricEfficientReturn(HistoricPortfolioStrategy):
-    """
-    Finds the portfolio with the minimum volatility for a given target return.
-    Now uses the robust, standardized workflow.
-    """
+
     params = (('target_return', 0.12),)
     
     def calculate_target_weights(self) -> dict:
@@ -475,12 +470,7 @@ class MarkowitzHistoricEfficientReturn(HistoricPortfolioStrategy):
             return self._smart_fallback_optimization(mu_filtered, S, tickers_to_use, "markowitz")
         
 class MinSemiVarianceHistoric(HistoricPortfolioStrategy):
-    """
-    ### FINAL, DEFINITIVE & ROBUST VERSION ###
-    Correctly uses the EfficientSemivariance class to find the single portfolio
-    that minimizes historical semi-variance, on a pre-screened universe of
-    low-volatility stocks.
-    """
+
     params = (('top_k', 10),)
     
     def calculate_target_weights(self) -> dict:
@@ -539,9 +529,7 @@ class MinSemiVarianceHistoric(HistoricPortfolioStrategy):
             return self._smart_fallback_optimization(mu_filtered, returns_filtered, tickers, "min_semivariance")
 
 class MeanCVaRHistoric(HistoricPortfolioStrategy, MarketAwareMixin):
-    """
-    Minimizes CVaR for a target return, with robust filtering and data cleaning.
-    """
+ 
     params = (('target_return', 0.10),)
 
     def calculate_target_weights(self) -> dict:
@@ -601,11 +589,7 @@ class MeanCVaRHistoric(HistoricPortfolioStrategy, MarketAwareMixin):
 # ==============================================================================
 
 class MarkowitzPredicted(RobustPredictedPortfolioStrategy):
-    """
-    Top-K Equal Weights Markowitz Strategy
-    Selects top K stocks based on predictions and applies Markowitz optimization
-    with equal weights as the target, using risk management for optimal allocation.
-    """
+
     def calculate_target_weights(self, todays_predictions: dict) -> dict:
         self.log("Calculating weights for TopKPredicted (Equal Weights Markowitz)...")
         if not todays_predictions:
@@ -671,10 +655,7 @@ class MarkowitzPredicted(RobustPredictedPortfolioStrategy):
             return self._smart_fallback_optimization(mu_predicted, S, available_tickers, "markowitz")
 
 class MinSemiVariancePredicted(RobustPredictedPortfolioStrategy):
-    """
-    CORRECTED: Minimizes downside variance for a portfolio of stocks with positive
-    predictions, using the dedicated EfficientSemivariance optimizer.
-    """
+
     def calculate_target_weights(self, todays_predictions: dict) -> dict:
         self.log("Calculating weights for Min-Semi-Variance (Predicted)...")
         if not todays_predictions: return {}
@@ -750,7 +731,6 @@ class MinSemiVariancePredicted(RobustPredictedPortfolioStrategy):
             return self._smart_fallback_optimization(mu_predicted, returns, final_tickers, "min_semivariance")
         
 class MinCVaRPredicted(RobustPredictedPortfolioStrategy):
-    """Minimizes CVaR with robust handling of extreme predictions."""
     def calculate_target_weights(self, todays_predictions: dict) -> dict:
         self.log("Calculating weights for Min-CVaR (Predicted)...")
         if not todays_predictions: return {}
@@ -822,11 +802,7 @@ class MinCVaRPredicted(RobustPredictedPortfolioStrategy):
 
 
 class TopKPredicted(PredictedPortfolioStrategy):
-    """
-    Top-K Equal Weights Strategy
-    Selects top K stocks based on predictions and allocates equal weights to each.
-    Simple, straightforward approach without complex optimization.
-    """
+
     def calculate_target_weights(self, todays_predictions: dict) -> dict:
         self.log("Calculating weights for TopKPredicted (Equal Weights)...")
         if not todays_predictions:
@@ -911,22 +887,19 @@ class EnhancedMarkowitzPredicted(PredictedPortfolioStrategy):
         self.previous_weights = {}
         self.prediction_confidence = {}
         self.last_rebalance_date = None
-        # Stop-loss and take-profit tracking
-        self.position_entry_prices = {}  # Track entry prices for each position
-        self.position_high_prices = {}   # Track highest prices for trailing stops
-        self.stop_loss_orders = {}       # Track active stop-loss orders
-        self.take_profit_orders = {}     # Track active take-profit orders
+        self.position_entry_prices = {}  
+        self.position_high_prices = {}  
+        self.stop_loss_orders = {}       
+        self.take_profit_orders = {}    
         
 
     def next(self):
-        # ✅ STEP 3: Add the check at the very beginning.
         if not self.trading_started:
-            return # Do absolutely nothing during the warm-up period.
+            return 
 
         if len(self) < self.p.lookback_period:
             return
             
-        # Use custom rebalancing frequency for more conservative approach
         if self.rebalance_timer % self.p.rebalance_frequency == 0:
             current_date = self.datas[0].datetime.date(0)
             predictions = self.daily_predictions.get(current_date, {})
@@ -939,7 +912,6 @@ class EnhancedMarkowitzPredicted(PredictedPortfolioStrategy):
         current_date = self.datas[0].datetime.date(0)
         predictions = self.daily_predictions.get(current_date, {})
         
-        # Add debug logging for the first few calls
         if len(self) < 10:  # Only log for first 10 bars to avoid spam
             if predictions:
                 self.log(f"Found {len(predictions)} predictions for {current_date}: {list(predictions.keys())}")
@@ -957,21 +929,17 @@ class EnhancedMarkowitzPredicted(PredictedPortfolioStrategy):
         return predictions
 
     def calculate_shrinkage_covariance(self, returns: pd.DataFrame) -> pd.DataFrame:
-        """Calculate shrinkage covariance matrix (Ledoit-Wolf)."""
 
         cov_returns = returns.cov() * 252
         try:
-            # This calculates the optimal Ledoit-Wolf shrinkage matrix directly.
             cov_matrix = risk_models.CovarianceShrinkage(cov_returns).ledoit_wolf()
         except Exception as e:
-            # Fallback in case of numerical errors
             self.log(f"Ledoit-Wolf shrinkage failed: {e}. Falling back to sample covariance.")
             cov_matrix = cov_returns.cov() * 252
         
         return pd.DataFrame(cov_matrix * 252, index=returns.columns, columns=returns.columns)
 
     def filter_correlated_assets(self, tickers: list, returns: pd.DataFrame) -> list:
-        """Remove highly correlated assets to improve diversification."""
         if len(tickers) <= 2:
             return tickers
             
@@ -979,7 +947,6 @@ class EnhancedMarkowitzPredicted(PredictedPortfolioStrategy):
         filtered_tickers = []
         
         for ticker in tickers:
-            # Check correlation with already selected tickers
             is_highly_correlated = False
             for selected_ticker in filtered_tickers:
                 if abs(corr_matrix.loc[ticker, selected_ticker]) > self.p.correlation_threshold:
@@ -992,28 +959,20 @@ class EnhancedMarkowitzPredicted(PredictedPortfolioStrategy):
         return filtered_tickers[:self.p.top_k]  # Ensure we don't exceed top_k
 
     def calculate_expected_returns(self, predictions: dict, tickers: list) -> pd.Series:
-        """
-        Calculate conservative blended expected returns with strict filtering.
-        Optimized for weak prediction signals with high noise.
-        """
+   
         expected_returns = pd.Series(index=tickers, dtype=float)
         
-        # Get historical prices once for efficiency
         prices = self.get_historical_prices()
         
         for ticker in tickers:
-            # Get predicted return (annualized) with strict capping
             predicted_return = predictions.get(ticker, 0) * 252
             
-            # Apply prediction decay for weak signals
             if hasattr(self.p, 'prediction_decay_factor'):
                 predicted_return *= (self.p.prediction_decay_factor ** 2)
             
-            # CAP extreme predictions to realistic levels
             if hasattr(self.p, 'prediction_cap'):
                 predicted_return = np.clip(predicted_return, -self.p.prediction_cap, self.p.prediction_cap)
             
-            # Calculate historical return with longer lookback for stability
             historical_return = 0.0
             try:
                 if ticker in prices.columns and len(prices[ticker]) >= 10:
@@ -1022,10 +981,8 @@ class EnhancedMarkowitzPredicted(PredictedPortfolioStrategy):
                     recent_returns = prices[ticker].pct_change().tail(lookback)
                     historical_return = recent_returns.mean() * 252
                     
-                    # Also cap historical returns to realistic levels
                     historical_return = np.clip(historical_return, -0.5, 0.5)
                 else:
-                    # Fallback: use EMA if available
                     if ticker in prices.columns and len(prices[ticker]) >= 20:
                         historical_return = expected_returns.ema_historical_return(prices[ticker].to_frame()).iloc[0] * 252
                         historical_return = np.clip(historical_return, -0.5, 0.5)
@@ -1033,11 +990,9 @@ class EnhancedMarkowitzPredicted(PredictedPortfolioStrategy):
                 self.log(f"Error calculating historical return for {ticker}: {e}")
                 historical_return = 0.0
             
-            # Conservative blending with heavy weight on historical data
             blended_return = (self.p.prediction_weight * predicted_return + 
                             self.p.historical_weight * historical_return)
             
-            # Final sanity check: cap blended return
             blended_return = np.clip(blended_return, -0.4, 0.4)
                 
             expected_returns[ticker] = blended_return
@@ -1049,13 +1004,10 @@ class EnhancedMarkowitzPredicted(PredictedPortfolioStrategy):
         return expected_returns
 
     def _log_blending_stats(self, predictions: dict, prices: pd.DataFrame, expected_returns: pd.Series, tickers: list):
-        """
-        Log statistics about the blending process for debugging and analysis.
-        """
+     
         if not tickers or len(expected_returns) == 0:
             return
             
-        # Calculate statistics for top 3 tickers
         top_tickers = expected_returns.nlargest(3).index
         
         self.log(f"EnhancedMarkowitz blending: {self.p.prediction_weight:.1%} prediction, {self.p.historical_weight:.1%} historical")
@@ -1065,7 +1017,6 @@ class EnhancedMarkowitzPredicted(PredictedPortfolioStrategy):
             if hasattr(self.p, 'prediction_decay_factor'):
                 pred_return *= (self.p.prediction_decay_factor ** 2)
             
-            # Calculate historical return for logging
             hist_return = 0.0
             try:
                 if ticker in prices.columns and len(prices[ticker]) >= 5:
@@ -1083,44 +1034,32 @@ class EnhancedMarkowitzPredicted(PredictedPortfolioStrategy):
         """Enhanced portfolio optimization with robust handling of numerical issues."""
         n_assets = len(expected_returns)
         
-        # Add small regularization to covariance matrix to avoid singularities
         reg_factor = 1e-6
         cov_matrix_reg = cov_matrix + reg_factor * np.eye(n_assets)
         
-        # Calculate dynamic bounds that respect the fully_invested parameter
         if self.p.fully_invested:
-            # Ensure full investment (no cash)
             min_weight = max(0.01, 1.0 / n_assets)  # At least 1% or equal weight
             max_weight = min(0.25, 1.0 / max(2, n_assets // 2))  # Cap at 25% or reasonable max
         else:
-            # Allow cash positions (weights can sum to less than 1.0)
             min_weight = 0.0  # Allow zero weights (cash)
             max_weight = 0.25  # Cap at 25% per stock
         
-        # Basic constraints - respect the fully_invested parameter
         constraints = []
         if self.p.fully_invested:
-            # Ensure weights sum to 1.0 (no cash)
             constraints.append({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
-        # If not fully_invested, no constraint on sum (allows cash)
         
-        # Simple objective function: maximize Sharpe ratio
         def objective(weights):
             portfolio_return = np.dot(weights, expected_returns)
             portfolio_risk = np.sqrt(np.dot(weights, np.dot(cov_matrix_reg.values, weights)))
-            # Add small epsilon to avoid division by zero
             return -(portfolio_return / (portfolio_risk + 1e-8))
         
-        # Use consistent bounds with other strategies
         if self.p.allow_shorting:
             bounds = [(-max_weight, max_weight) for _ in range(n_assets)]
         else:
             bounds = [(min_weight, max_weight) for _ in range(n_assets)]
         
-        # Initial guess: equal weight
         x0 = np.ones(n_assets) / n_assets
         
-        # Try optimization methods with better tolerance settings
         optimization_methods = [
             ('SLSQP', {'maxiter': 300, 'ftol': 1e-8, 'eps': 1e-8}),
             ('trust-constr', {'maxiter': 200, 'xtol': 1e-8, 'gtol': 1e-8}),
@@ -1166,7 +1105,6 @@ class EnhancedMarkowitzPredicted(PredictedPortfolioStrategy):
             except Exception as e:
                 continue
         
-        # If all optimization methods fail, use equal weight allocation
         if self.p.fully_invested:
             equal_weight = 1.0 / n_assets
             weights_dict = {ticker: equal_weight for ticker in expected_returns.index}
@@ -1215,7 +1153,6 @@ class EnhancedMarkowitzPredicted(PredictedPortfolioStrategy):
         return should_rebalance
 
     def _calculate_portfolio_sharpe(self, weights: dict, expected_returns: pd.Series, cov_matrix: pd.DataFrame) -> float:
-        """Calculate portfolio Sharpe ratio for given weights with robust ticker handling."""
         if not weights:
             return 0.0
         
@@ -1249,10 +1186,7 @@ class EnhancedMarkowitzPredicted(PredictedPortfolioStrategy):
         return portfolio_return / (portfolio_risk + 1e-8) if portfolio_risk > 1e-8 else 0.0
 
     def calculate_target_weights(self, todays_predictions: dict) -> Optional[dict]:
-        """
-        Conservative target weight calculation optimized for weak prediction signals.
-        Uses strict filtering, realistic return caps, and Sharpe-based rebalancing decisions.
-        """
+   
         if not todays_predictions:
             return {}
         

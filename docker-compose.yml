@@ -1,24 +1,20 @@
-# trading_platform/docker-compose.yml
-
 x-app-image-name: &app-image "niejemglutenu/trading_platform_app:latest"
-
 
 x-cli-app-base: &cli-app-base
   env_file: .env
   build:
     context: .
-    dockerfile: Dockerfile # Assumes your primary app Dockerfile is named Dockerfile
-
+    dockerfile: Dockerfile 
   volumes:
-    - ./app:/opt/app/app   # Mounts local app to /opt/app/app in container
-    - ./configs:/opt/app/configs # Mounts local configs to /opt/app/configs
+    - ./app:/opt/app/app   
+    - ./configs:/opt/app/configs 
     - ./data:/opt/app/data 
-    - ./logs:/opt/app/logs     # For logs on host
+    - ./logs:/opt/app/logs   
     - ./data/matplotlib_cache:/opt/app/data/matplotlib_cache
   environment:
   - PYTHONUNBUFFERED=1
   - MPLCONFIGDIR=/opt/app/data/matplotlib_cache
-  - DB_HOST=host.docker.internal         # ✅ Correct name
+  - DB_HOST=host.docker.internal      
   - DB_NAME=${DB_NAME_ENV_VAR}
   - DB_USER=${DB_USER_ENV_VAR}
   - DB_PASSWORD=${DB_PASSWORD_ENV_VAR}
@@ -26,29 +22,26 @@ x-cli-app-base: &cli-app-base
   - ALPACA_API_SECRET=${ALPACA_API_SECRET_ENV_VAR}
   - ALPACA_SANDBOX_MODE=${ALPACA_SANDBOX_MODE_ENV_VAR}
   
-  develop: # NEW SECTION
+  develop: 
     watch:
-      - action: sync # Sync Python code changes
-        path: ./app # Local path to watch
-        target: /opt/app/app # Target path inside the container
-        ignore: # Optional: patterns to ignore
+      - action: sync 
+        path: ./app 
+        target: /opt/app/app 
+        ignore: 
           - __pycache__/
           - .git/
-          - .venv/ # If your venv is inside ./app (unlikely for project root)
-      - action: rebuild # Rebuild if requirements change
+          - .venv/ 
+      - action: rebuild 
         path: requirements.txt
-      # You could also watch Dockerfile itself for rebuild, though changing it usually means manual rebuild anyway
-      # - action: rebuild
-      #   path: Dockerfile
 
   
 
 
 services:
   backtest-runner:
-    <<: *cli-app-base # Inherit common CLI app settings
+    <<: *cli-app-base 
     container_name: trading_platform_backtester
-    command: > # Default command if 'docker-compose up backtest-runner' is used
+    command: > 
       python -m app.cli
       --mode "backtest" 
       --base-config "app_config.yaml"
