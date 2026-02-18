@@ -1,6 +1,6 @@
 Miłosz Aubrecht-Prądzyński
 
-
+Przygotowany program służy przeprowadzaniu syumulacji przebiegu inwestycji portfelowej. 
 
 RUN: python desktop_dashboard/main_gui.py
 Następnie za pomocą interfejsu GUI, użytkownik wybiera z pośród dostępnych opcji.
@@ -25,6 +25,7 @@ WIZUALIZACJA WYNIKÓW
 <img width="1890" height="999" alt="image" src="https://github.com/user-attachments/assets/40ea9472-86b5-4cd3-ac5a-a908ceab5667" />
 
 <img width="1898" height="611" alt="image" src="https://github.com/user-attachments/assets/5adc258c-279f-42c5-b702-5a49c809b005" />
+
 
 
 
