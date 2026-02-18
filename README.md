@@ -11,8 +11,6 @@ Możliwe scenariusze:
 4) 1+2+3 lub 2+3
 5) analiza zapisanych wyników
 
-Biorąc pod uwagę skomplikowany oraz nieczysty kod zamieszczam zrzuty ekranu w celu ułatwienia przeprowadzenia oceny.
-
 APP SCCRENN SHOT
 OPCJE 
 <img width="1908" height="960" alt="image" src="https://github.com/user-attachments/assets/fb1fb02a-4fcc-41f9-8695-21c540cf52b7" />
@@ -25,6 +23,7 @@ WIZUALIZACJA WYNIKÓW
 <img width="1890" height="999" alt="image" src="https://github.com/user-attachments/assets/40ea9472-86b5-4cd3-ac5a-a908ceab5667" />
 
 <img width="1898" height="611" alt="image" src="https://github.com/user-attachments/assets/5adc258c-279f-42c5-b702-5a49c809b005" />
+
 
 
 
